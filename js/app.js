@@ -7,6 +7,7 @@ import * as bowlerPage from "./pages/bowler.js";
 import * as batterPage from "./pages/batter.js";
 import * as milestonesPage from "./pages/milestones.js";
 import * as venuesPage from "./pages/venues.js";
+import * as pointsPage from "./pages/points.js";
 
 const content = document.getElementById("content");
 const sidebar = document.getElementById("sidebar");
@@ -20,6 +21,7 @@ const pages = {
   batter:     batterPage,
   milestones: milestonesPage,
   venues:     venuesPage,
+  points:     pointsPage,
 };
 
 let currentPage = "";

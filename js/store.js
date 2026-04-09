@@ -19,6 +19,7 @@ export async function milestones() { return load("milestones"); }
 export async function bvb()        { return load("bvb"); }
 export async function bvbInnings() { return load("bvb_innings"); }
 export async function batterTeam() { return load("batter_team"); }
+export async function pointsTable() { return load("points_table"); }
 
 export function logoUrl(code) {
   return `logos/${code}.png`;

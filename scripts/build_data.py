@@ -539,6 +539,137 @@ def build_milestones(df):
     for m in watchlist: m.pop("_n"); m["icon"] = "👀"
     return {"imminent": milestones[:15], "watchlist": watchlist[:15]}
 
+# ─── Points Table (2026 Season) ────────────────────────────────────────────────
+
+def build_points_table(df, info_df):
+    print("🏆 Building 2026 points table...")
+    df_2026 = df[df["start_date"].dt.year == 2026].copy()
+    if df_2026.empty:
+        return {"standings": [], "team_results": {}}
+
+    df_2026["total_runs"] = df_2026["runs_off_bat"].fillna(0) + df_2026["extras"].fillna(0)
+    df_2026["is_legal"] = df_2026["wides"].isna() & df_2026["noballs"].isna()
+
+    # Per-team per-match aggregation for NRR
+    match_team_stats = {}
+    for (mid, inn, bat_team), grp in df_2026.groupby(["match_id", "innings", "batting_team"]):
+        key = (str(mid), _code(bat_team))
+        runs = int(grp["total_runs"].sum())
+        legal = grp["is_legal"].sum()
+        overs = legal / 6
+        # Check if all out (last wicket in innings)
+        all_out = grp["wicket_type"].notna().sum()
+        max_ball = grp["ball"].max() if "ball" in grp.columns else 0
+        match_team_stats.setdefault(str(mid), {})[_code(bat_team)] = {
+            "runs_scored": runs, "overs_faced": round(overs, 1),
+        }
+
+    # Get match-level info for 2026
+    info_2026_ids = set(df_2026["match_id"].astype(str).unique())
+    rel_info = info_df[info_df["match_id"].astype(str).isin(info_2026_ids)]
+
+    def _get(field):
+        sub = rel_info[rel_info["field"] == field][["match_id", "value"]].copy()
+        sub.columns = ["match_id", field]
+        sub["match_id"] = sub["match_id"].astype(str)
+        return sub
+
+    winners = _get("winner")
+    dates = _get("date")
+    venues = _get("venue")
+    teams_info = rel_info[rel_info["field"] == "team"][["match_id", "value"]].copy()
+    teams_info.columns = ["match_id", "team"]
+    teams_info["match_id"] = teams_info["match_id"].astype(str)
+    match_teams = teams_info.groupby("match_id")["team"].apply(list).reset_index()
+    match_teams = match_teams[match_teams["team"].apply(len) == 2]
+    winner_runs = _get("winner_runs")
+    winner_wickets = _get("winner_wickets")
+    outcomes = _get("outcome")
+
+    base = match_teams.copy()
+    for extra in [winners, dates, venues, winner_runs, winner_wickets, outcomes]:
+        base = base.merge(extra, on="match_id", how="left")
+
+    # Build standings and results
+    standings = {}
+    team_results = {}
+
+    for _, row in base.iterrows():
+        mid = row["match_id"]
+        t1_full, t2_full = row["team"][0], row["team"][1]
+        t1, t2 = _code(t1_full), _code(t2_full)
+        if t1 not in CURRENT_TEAMS or t2 not in CURRENT_TEAMS:
+            continue
+
+        for t in [t1, t2]:
+            if t not in standings:
+                standings[t] = {"team": t, "p": 0, "w": 0, "l": 0, "nr": 0, "pts": 0,
+                                "nrr_for_runs": 0, "nrr_for_overs": 0,
+                                "nrr_against_runs": 0, "nrr_against_overs": 0}
+
+        winner_full = row.get("winner")
+        w_code = _code(winner_full) if pd.notna(winner_full) else None
+
+        standings[t1]["p"] += 1
+        standings[t2]["p"] += 1
+
+        if w_code and w_code in (t1, t2):
+            loser = t2 if w_code == t1 else t1
+            standings[w_code]["w"] += 1
+            standings[w_code]["pts"] += 2
+            standings[loser]["l"] += 1
+        else:
+            standings[t1]["nr"] += 1
+            standings[t2]["nr"] += 1
+            standings[t1]["pts"] += 1
+            standings[t2]["pts"] += 1
+
+        # NRR components
+        mts = match_team_stats.get(mid, {})
+        for t, opp in [(t1, t2), (t2, t1)]:
+            my = mts.get(t, {})
+            their = mts.get(opp, {})
+            standings[t]["nrr_for_runs"] += my.get("runs_scored", 0)
+            standings[t]["nrr_for_overs"] += my.get("overs_faced", 0)
+            standings[t]["nrr_against_runs"] += their.get("runs_scored", 0)
+            standings[t]["nrr_against_overs"] += their.get("overs_faced", 0)
+
+        # Build result entries for each team
+        margin = ""
+        if pd.notna(row.get("winner_runs")):
+            margin = f"by {int(float(row['winner_runs']))} runs"
+        elif pd.notna(row.get("winner_wickets")):
+            margin = f"by {int(float(row['winner_wickets']))} wickets"
+        result_text = f"{w_code} won {margin}" if w_code else "No result"
+        raw_date = str(row.get("date", "")).replace("/", "-")
+        venue = str(row.get("venue", ""))
+
+        for t, opp in [(t1, t2), (t2, t1)]:
+            won = w_code == t
+            lost = w_code is not None and w_code != t
+            team_results.setdefault(t, []).append({
+                "date": raw_date, "opponent": opp, "venue": venue,
+                "result": "W" if won else ("L" if lost else "NR"),
+                "result_text": result_text, "margin": margin,
+            })
+
+    # Compute NRR
+    for s in standings.values():
+        nrr_for = (s["nrr_for_runs"] / s["nrr_for_overs"]) if s["nrr_for_overs"] > 0 else 0
+        nrr_against = (s["nrr_against_runs"] / s["nrr_against_overs"]) if s["nrr_against_overs"] > 0 else 0
+        s["nrr"] = round(nrr_for - nrr_against, 3)
+        del s["nrr_for_runs"], s["nrr_for_overs"], s["nrr_against_runs"], s["nrr_against_overs"]
+
+    # Sort: pts desc, nrr desc, w desc
+    sorted_standings = sorted(standings.values(), key=lambda x: (-x["pts"], -x["nrr"], -x["w"]))
+
+    # Sort each team's results by date desc
+    for t in team_results:
+        team_results[t].sort(key=lambda x: x["date"], reverse=True)
+
+    return {"standings": sorted_standings, "team_results": team_results}
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -575,6 +706,9 @@ def main():
 
     ms = build_milestones(df.copy())
     _write("milestones.json", ms)
+
+    pts = build_points_table(df.copy(), info_df)
+    _write("points_table.json", pts)
 
     print("✅ All data files written to data/")
 
