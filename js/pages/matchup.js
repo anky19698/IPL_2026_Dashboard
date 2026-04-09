@@ -18,7 +18,7 @@ export async function render(el) {
       <div class="dropdown" id="batDrop"></div>
     </div>
     <div class="search-wrap">
-      <span class="search-icon">🎳</span>
+      <span class="search-icon">⚾</span>
       <input class="search-input" id="bowlSearch" placeholder="Search bowler..." autocomplete="off">
       <div class="dropdown" id="bowlDrop"></div>
     </div>
@@ -54,7 +54,7 @@ export async function render(el) {
       <div style="font-size:1.3rem; font-weight:800;">
         🏏 <span style="color:var(--gold);">${m.batter}</span>
         <span style="color:var(--text-dim);"> vs </span>
-        🎳 <span>${m.bowler}</span>
+        ⚾ <span>${m.bowler}</span>
       </div>
       <div style="color:var(--text-muted); font-size:0.82rem; margin-top:0.3rem;">All-Time IPL</div>
     </div>`;
@@ -83,7 +83,7 @@ export async function render(el) {
 
     // Verdict
     if (m.dismissals >= 3 && m.sr < 120)
-      h += `<div class="card animate-in" style="margin-top:1rem; border-left:3px solid var(--red); padding:0.8rem 1rem;"><strong>Verdict:</strong> 🎳 <strong>${m.bowler}</strong> dominates — ${m.dismissals} dismissals at SR ${m.sr}</div>`;
+      h += `<div class="card animate-in" style="margin-top:1rem; border-left:3px solid var(--red); padding:0.8rem 1rem;"><strong>Verdict:</strong> ⚾ <strong>${m.bowler}</strong> dominates — ${m.dismissals} dismissals at SR ${m.sr}</div>`;
     else if (m.dismissals === 0 && m.sr > 140 && m.balls >= 12)
       h += `<div class="card animate-in" style="margin-top:1rem; border-left:3px solid var(--green); padding:0.8rem 1rem;"><strong>Verdict:</strong> 🏏 <strong>${m.batter}</strong> dominates — ${m.runs} runs at SR ${m.sr}, never dismissed</div>`;
 

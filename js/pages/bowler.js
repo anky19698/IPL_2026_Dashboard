@@ -8,11 +8,11 @@ export async function render(el) {
   const bowlers = [...new Set(bvbData.filter(m => m.balls >= 6).map(m => m.bowler))].sort();
 
   let html = `<div class="page-header">
-    <h1>🎳 <span class="accent">Bowler Strengths</span></h1>
+    <h1>⚾ <span class="accent">Bowler Strengths</span></h1>
     <p>Select a bowler to see every batter they've dismissed 2+ times in IPL history</p>
   </div>
   <div class="search-wrap" style="max-width:500px;">
-    <span class="search-icon">🎳</span>
+    <span class="search-icon">⚾</span>
     <input class="search-input" id="bowlPick" placeholder="Search bowler..." autocomplete="off">
     <div class="dropdown" id="bowlPickDrop"></div>
   </div>
