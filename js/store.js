@@ -21,6 +21,8 @@ export async function bvbInnings() { return load("bvb_innings"); }
 export async function batterTeam() { return load("batter_team"); }
 export async function pointsTable() { return load("points_table"); }
 
+export async function meta()       { return load("meta"); }
+
 export function logoUrl(code) {
   return `logos/${code}.png`;
 }

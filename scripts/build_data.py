@@ -6,6 +6,7 @@ Run daily via GitHub Actions or manually: python scripts/build_data.py
 """
 
 import io, json, math, os, sys, zipfile, glob
+from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 import requests
@@ -709,6 +710,8 @@ def main():
 
     pts = build_points_table(df.copy(), info_df)
     _write("points_table.json", pts)
+
+    _write("meta.json", {"generated_at": datetime.now(timezone.utc).isoformat()})
 
     print("✅ All data files written to data/")
 

@@ -8,6 +8,7 @@ import * as batterPage from "./pages/batter.js";
 import * as milestonesPage from "./pages/milestones.js";
 import * as venuesPage from "./pages/venues.js";
 import * as pointsPage from "./pages/points.js";
+import * as store from "./store.js";
 
 const content = document.getElementById("content");
 const sidebar = document.getElementById("sidebar");
@@ -63,5 +64,35 @@ document.addEventListener("click", e => {
     sidebar.classList.remove("open");
 });
 
+function formatDataAge(isoString) {
+  const generated = new Date(isoString);
+  const now = new Date();
+  const diffMs = now - generated;
+  const mins = Math.floor(diffMs / 60000);
+  const hrs  = Math.floor(mins / 60);
+  const days = Math.floor(hrs / 24);
+
+  let ago;
+  if (mins < 1)       ago = "just now";
+  else if (mins < 60) ago = `${mins}m ago`;
+  else if (hrs < 24)  ago = `${hrs}h ago`;
+  else                ago = `${days}d ago`;
+
+  return `Data: ${ago}`;
+}
+
+async function updateDataAge() {
+  const badge = document.getElementById("dataAge");
+  if (!badge) return;
+  try {
+    const m = await store.meta();
+    badge.textContent = formatDataAge(m.generated_at);
+    badge.title = `Last built: ${new Date(m.generated_at).toLocaleString()}`;
+  } catch {
+    badge.textContent = "Data: unknown";
+  }
+}
+
 window.addEventListener("hashchange", route);
 route();
+updateDataAge();
