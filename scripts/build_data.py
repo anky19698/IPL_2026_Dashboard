@@ -15,6 +15,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT, "data")
 RAW_DIR = os.path.join(ROOT, ".cricsheet_raw")
 CRICSHEET_URL = "https://cricsheet.org/downloads/ipl_male_csv2.zip"
+SCHEDULE_FILE = os.path.join(ROOT, "scripts", "official_schedule_2026.json")
 
 # ─── Team name normalisation ─────────────────────────────────────────────────
 
@@ -243,6 +244,20 @@ SCHEDULE = [
     {"match":73,"date":"2026-05-30","team1":"TBD","team2":"TBD","venue":"TBD","time":"19:30","stage":"Qualifier 2"},
     {"match":74,"date":"2026-05-31","team1":"TBD","team2":"TBD","venue":"TBD","time":"19:30","stage":"Final"},
 ]
+
+def load_official_schedule(default_schedule):
+    try:
+        with open(SCHEDULE_FILE, "r", encoding="utf-8") as f:
+            schedule = json.load(f)
+        if not isinstance(schedule, list) or not schedule:
+            raise ValueError("schedule file is empty or invalid")
+        return schedule
+    except Exception as exc:
+        print(f"⚠️  Failed to load official schedule from {SCHEDULE_FILE}: {exc}")
+        print("   Falling back to in-file schedule list.")
+        return default_schedule
+
+SCHEDULE = load_official_schedule(SCHEDULE)
 
 # ─── CricSheet data fetcher ───────────────────────────────────────────────────
 
