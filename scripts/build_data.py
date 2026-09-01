@@ -11,7 +11,7 @@ Or let the daily GitHub Action do it.
 Everything you might want to change lives in the SETTINGS block below.
 """
 
-import io, json, glob, os, shutil, sys, zipfile, zlib
+import io, json, glob, os, shutil, sys, time, zipfile, zlib
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
@@ -47,6 +47,20 @@ COMPETITIONS = [
     {"code": "o", "name": "ODI",  "slug": "odis",  "url": "https://cricsheet.org/downloads/odis_male_csv2.zip"},
     {"code": "i", "name": "T20I", "slug": "t20s",  "url": "https://cricsheet.org/downloads/t20s_male_csv2.zip"},
 ]
+
+# CricSheet blocks requests that do not look like they came from a browser.
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
+    "Accept": "application/zip,application/octet-stream,*/*",
+    "Accept-Language": "en-GB,en;q=0.9",
+    "Referer": "https://cricsheet.org/downloads/",
+}
+
+# How many times to retry a download, and how long to wait between tries
+# (the wait grows with each attempt).
+download_attempts = 4
+seconds_between_download_attempts = 15
 
 # Skip the download and reuse whatever is already unzipped in .cricsheet_raw.
 # Handy while developing; the GitHub Action always downloads fresh.
@@ -129,17 +143,53 @@ def download_competition(comp):
         print(f"   reusing already-downloaded {comp['name']} files")
         return folder
 
-    import requests
     print(f"⬇  downloading {comp['name']} data...")
-    response = requests.get(comp["url"], timeout=600)
-    response.raise_for_status()
+    payload = fetch_archive(comp["url"])
+
     # Start from an empty folder so a match withdrawn upstream does not linger.
     if os.path.isdir(folder):
         shutil.rmtree(folder)
     os.makedirs(folder, exist_ok=True)
-    with zipfile.ZipFile(io.BytesIO(response.content), "r") as archive:
+    with zipfile.ZipFile(io.BytesIO(payload), "r") as archive:
         archive.extractall(folder)
     return folder
+
+
+def fetch_archive(url):
+    """
+    Download one CricSheet zip.
+
+    CricSheet turns away requests that do not look like a browser — a bare
+    script user-agent has come back as 415 Unsupported Media Type, and
+    sometimes as a 200 carrying an HTML block page instead of the zip. So we
+    send browser-like headers, check the reply really is a zip, and retry a
+    few times before giving up with something useful in the log.
+    """
+    import requests
+
+    last_problem = "no attempt made"
+    for attempt in range(1, download_attempts + 1):
+        try:
+            response = requests.get(url, timeout=600, headers=BROWSER_HEADERS)
+        except Exception as exc:
+            last_problem = f"request failed: {exc}"
+        else:
+            body = response.content
+            if response.status_code != 200:
+                last_problem = f"HTTP {response.status_code}"
+            elif body[:2] != b"PK":
+                kind = response.headers.get("content-type", "unknown")
+                preview = " ".join(body[:200].decode("utf-8", "replace").split())
+                last_problem = f"reply was not a zip (content-type {kind}): {preview}"
+            else:
+                print(f"   {len(body)/1024/1024:.1f} MB")
+                return body
+
+        print(f"   attempt {attempt} of {download_attempts} — {last_problem}")
+        if attempt < download_attempts:
+            time.sleep(seconds_between_download_attempts * attempt)
+
+    raise RuntimeError(f"could not download {url} — {last_problem}")
 
 
 def read_deliveries(folder):
