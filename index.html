@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>IPL 2026 Analysis Hub</title>
+  <title>Cricket Analysis Hub — IPL &amp; International</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏏</text></svg>">
   <link rel="stylesheet" href="css/styles.css">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
@@ -18,14 +18,17 @@
   <nav id="sidebar" class="sidebar">
     <div class="sidebar__brand">
       <span class="sidebar__logo">🏏</span>
-      <span class="sidebar__title">IPL 2026</span>
+      <span class="sidebar__title">Cricket Hub</span>
     </div>
     <div class="sidebar__links">
-      <a href="#schedule" class="nav-link active" data-page="schedule">
-        <span class="nav-icon">📅</span><span class="nav-text">Schedule</span>
+      <a href="#strengths" class="nav-link active" data-page="strengths">
+        <span class="nav-icon">💪</span><span class="nav-text">Batter Strengths</span>
       </a>
-      <a href="#preview" class="nav-link" data-page="preview">
-        <span class="nav-icon">🔍</span><span class="nav-text">Match Preview</span>
+      <a href="#weakness" class="nav-link" data-page="weakness">
+        <span class="nav-icon">🎯</span><span class="nav-text">Batter Weakness</span>
+      </a>
+      <a href="#batterteams" class="nav-link" data-page="batterteams">
+        <span class="nav-icon">🛡</span><span class="nav-text">Batter vs Teams</span>
       </a>
       <a href="#matchup" class="nav-link" data-page="matchup">
         <span class="nav-icon">⚔️</span><span class="nav-text">Player Matchup</span>
@@ -33,33 +36,27 @@
       <a href="#bowler" class="nav-link" data-page="bowler">
         <span class="nav-icon">⚾</span><span class="nav-text">Bowler Strengths</span>
       </a>
-      <a href="#batter" class="nav-link" data-page="batter">
-        <span class="nav-icon">🏏</span><span class="nav-text">Batter vs Team</span>
-      </a>
       <a href="#milestones" class="nav-link" data-page="milestones">
-        <span class="nav-icon">🎯</span><span class="nav-text">Milestones</span>
-      </a>
-      <a href="#points" class="nav-link" data-page="points">
-        <span class="nav-icon">🏆</span><span class="nav-text">Points Table</span>
+        <span class="nav-icon">🏅</span><span class="nav-text">Milestones</span>
       </a>
       <a href="#venues" class="nav-link" data-page="venues">
         <span class="nav-icon">🏟</span><span class="nav-text">Venue Explorer</span>
       </a>
     </div>
     <div class="sidebar__footer">
-      <span class="data-badge" id="dataAge">Data: Loading...</span>
+      <span class="data-badge" id="dataAge">Data: Loading…</span>
+      <span class="sidebar__note">IPL · Test · ODI · T20I</span>
     </div>
   </nav>
 
   <!-- Mobile bottom nav -->
   <nav id="bottomNav" class="bottom-nav">
-    <a href="#schedule" class="bnav active" data-page="schedule"><span>📅</span><small>Schedule</small></a>
-    <a href="#preview" class="bnav" data-page="preview"><span>🔍</span><small>Preview</small></a>
-    <a href="#matchup" class="bnav" data-page="matchup"><span>⚔️</span><small>Matchup</small></a>
+    <a href="#strengths" class="bnav active" data-page="strengths"><span>💪</span><small>Strong</small></a>
+    <a href="#weakness" class="bnav" data-page="weakness"><span>🎯</span><small>Weak</small></a>
+    <a href="#batterteams" class="bnav" data-page="batterteams"><span>🛡</span><small>Teams</small></a>
+    <a href="#matchup" class="bnav" data-page="matchup"><span>⚔️</span><small>H2H</small></a>
     <a href="#bowler" class="bnav" data-page="bowler"><span>⚾</span><small>Bowler</small></a>
-    <a href="#batter" class="bnav" data-page="batter"><span>🏏</span><small>Batter</small></a>
-    <a href="#milestones" class="bnav" data-page="milestones"><span>🎯</span><small>Miles.</small></a>
-    <a href="#points" class="bnav" data-page="points"><span>🏆</span><small>Table</small></a>
+    <a href="#milestones" class="bnav" data-page="milestones"><span>🏅</span><small>Miles</small></a>
     <a href="#venues" class="bnav" data-page="venues"><span>🏟</span><small>Venues</small></a>
   </nav>
 
@@ -72,7 +69,7 @@
   <main id="content" class="content">
     <div class="loader" id="globalLoader">
       <div class="loader__spinner"></div>
-      <p>Loading IPL data...</p>
+      <p>Loading cricket data…</p>
     </div>
   </main>
 

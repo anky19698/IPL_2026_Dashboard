@@ -1,741 +1,662 @@
 #!/usr/bin/env python3
 """
-IPL 2026 Dashboard — Data Builder
-Downloads CricSheet ball-by-ball data and outputs JSON files for the static site.
-Run daily via GitHub Actions or manually: python scripts/build_data.py
+Cricket Analysis Hub — Data Builder
+
+Downloads CricSheet ball-by-ball data for the IPL and for men's international
+cricket (Test, ODI, T20I) and writes the JSON files the static site reads.
+
+Run it by hand with:  python scripts/build_data.py
+Or let the daily GitHub Action do it.
+
+Everything you might want to change lives in the SETTINGS block below.
 """
 
-import io, json, math, os, sys, zipfile, glob
-from datetime import datetime, timezone
+import io, json, glob, os, shutil, sys, zipfile, zlib
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
+
 import pandas as pd
-import numpy as np
-import requests
+
+# Windows terminals default to a codepage that cannot print the emoji in our
+# progress messages, so force UTF-8 output everywhere.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from teams_registry import (
+    canonical_team, find_near_duplicates, team_details,
+    IPL_TEAMS, CURRENT_IPL_TEAMS, _plain,
+)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SETTINGS
+# ══════════════════════════════════════════════════════════════════════════════
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT, "data")
 RAW_DIR = os.path.join(ROOT, ".cricsheet_raw")
-CRICSHEET_URL = "https://cricsheet.org/downloads/ipl_male_csv2.zip"
-SCHEDULE_FILE = os.path.join(ROOT, "scripts", "official_schedule_2026.json")
 
-# ─── Team name normalisation ─────────────────────────────────────────────────
-
-TEAM_CODE_MAP = {
-    "Chennai Super Kings": "CSK", "Mumbai Indians": "MI",
-    "Royal Challengers Bangalore": "RCB", "Royal Challengers Bengaluru": "RCB",
-    "Kolkata Knight Riders": "KKR", "Sunrisers Hyderabad": "SRH",
-    "Delhi Capitals": "DC", "Delhi Daredevils": "DC",
-    "Punjab Kings": "PBKS", "Kings XI Punjab": "PBKS",
-    "Rajasthan Royals": "RR", "Lucknow Super Giants": "LSG",
-    "Gujarat Titans": "GT", "Rising Pune Supergiant": "RPS",
-    "Rising Pune Supergiants": "RPS", "Pune Warriors": "PW",
-    "Gujarat Lions": "GL", "Deccan Chargers": "SRH",
-    "Kochi Tuskers Kerala": "KTK",
-}
-
-CURRENT_TEAMS = {"CSK", "MI", "RCB", "KKR", "SRH", "DC", "PBKS", "RR", "LSG", "GT"}
-BOWLER_WKT_TYPES = {"bowled", "caught", "caught and bowled", "lbw", "stumped", "hit wicket"}
-
-def _code(name): return TEAM_CODE_MAP.get(name, name)
-
-VENUE_NORM = {
-    "m.chinnaswamy stadium": "M. Chinnaswamy Stadium, Bengaluru",
-    "m chinnaswamy stadium": "M. Chinnaswamy Stadium, Bengaluru",
-    "chinnaswamy": "M. Chinnaswamy Stadium, Bengaluru",
-    "wankhede stadium": "Wankhede Stadium, Mumbai",
-    "wankhede": "Wankhede Stadium, Mumbai",
-    "ma chidambaram stadium, chepauk, chennai": "M.A. Chidambaram Stadium, Chennai",
-    "ma chidambaram stadium, chepauk": "M.A. Chidambaram Stadium, Chennai",
-    "chepauk": "M.A. Chidambaram Stadium, Chennai",
-    "chidambaram": "M.A. Chidambaram Stadium, Chennai",
-    "eden gardens": "Eden Gardens, Kolkata",
-    "rajiv gandhi international stadium, uppal": "Rajiv Gandhi Intl. Stadium, Hyderabad",
-    "rajiv gandhi international stadium": "Rajiv Gandhi Intl. Stadium, Hyderabad",
-    "arun jaitley stadium, delhi": "Arun Jaitley Stadium, Delhi",
-    "arun jaitley stadium": "Arun Jaitley Stadium, Delhi",
-    "feroz shah kotla": "Arun Jaitley Stadium, Delhi",
-    "narendra modi stadium, ahmedabad": "Narendra Modi Stadium, Ahmedabad",
-    "narendra modi stadium": "Narendra Modi Stadium, Ahmedabad",
-    "motera": "Narendra Modi Stadium, Ahmedabad",
-    "sardar patel stadium, motera": "Narendra Modi Stadium, Ahmedabad",
-    "bharat ratna shri atal bihari vajpayee ekana cricket stadium, lucknow": "Ekana Cricket Stadium, Lucknow",
-    "ekana cricket stadium, lucknow": "Ekana Cricket Stadium, Lucknow",
-    "ekana cricket stadium": "Ekana Cricket Stadium, Lucknow",
-    "sawai mansingh stadium": "Sawai Mansingh Stadium, Jaipur",
-    "punjab cricket association is bindra stadium, mohali": "PCA Stadium, Mohali",
-    "punjab cricket association stadium, mohali": "PCA Stadium, Mohali",
-    "maharaja yadavindra singh international cricket stadium, mullanpur": "New PCA Stadium, Mullanpur",
-    "new pca stadium, mullanpur": "New PCA Stadium, Mullanpur",
-    "himachal pradesh cricket association stadium": "HPCA Stadium, Dharamsala",
-    "barsapara cricket stadium, guwahati": "ACA Stadium, Guwahati",
-    "aca-vdca cricket stadium, guwahati": "ACA Stadium, Guwahati",
-    "shaheed veer narayan singh international stadium": "SVN Stadium, Raipur",
-    "dr. y.s. rajasekhara reddy aca-vdca cricket stadium, visakhapatnam": "ACA-VDCA Stadium, Visakhapatnam",
-    "dr dy patil sports academy, navi mumbai": "DY Patil Stadium, Navi Mumbai",
-    "brabourne stadium, mumbai": "Brabourne Stadium, Mumbai",
-    "maharashtra cricket association stadium, pune": "MCA Stadium, Pune",
-    "subrata roy sahara stadium": "MCA Stadium, Pune",
-}
-
-def _norm_venue(raw):
-    if pd.isna(raw): return "Unknown"
-    key = raw.strip().lower()
-    for pat, canon in VENUE_NORM.items():
-        if pat in key: return canon
-    return raw.strip()
-
-# ─── Static data ──────────────────────────────────────────────────────────────
-
-TEAMS = {
-    "CSK": {
-        "name": "Chennai Super Kings", "short": "CSK",
-        "captain": "Ruturaj Gaikwad", "coach": "Stephen Fleming",
-        "home_ground": "M.A. Chidambaram Stadium, Chennai",
-        "primary_color": "#FFCB05", "secondary_color": "#0081E9", "group": "A",
-        "key_players": ["Ruturaj Gaikwad", "MS Dhoni", "Sanju Samson", "Shivam Dube", "Khaleel Ahmed"],
-        "squad_2026": ["RD Gaikwad","MS Dhoni","SV Samson","S Dube","A Mhatre","SN Khan","Kartik Sharma","A Kamboj","J Overton","D Brevis","MW Short","KK Ahmed","Noor Ahmad","MJ Henry","Rahul Chahar","S Gopal","Gurjapneet Singh","Mukesh Choudhary","Prashant Veer","Aman Khan","R Ghosh","N Ellis","A Hosein","Z Foulkes"],
-    },
-    "MI": {
-        "name": "Mumbai Indians", "short": "MI",
-        "captain": "Hardik Pandya", "coach": "Mark Boucher",
-        "home_ground": "Wankhede Stadium, Mumbai",
-        "primary_color": "#004BA0", "secondary_color": "#D1AB3E", "group": "B",
-        "key_players": ["Hardik Pandya", "Rohit Sharma", "Jasprit Bumrah", "Suryakumar Yadav", "Tilak Varma"],
-        "squad_2026": ["HH Pandya","RG Sharma","SA Yadav","Tilak Varma","JJ Bumrah","RD Rickelton","Naman Dhir","SN Thakur","M Markande","TA Boult","AM Ghazanfar","WG Jacks","Q de Kock","DL Chahar","R Minz","C Bosch","SE Rutherford","MJ Santner","Raj Bawa","D Malewar","Raghu Sharma","Ashwani Kumar","M Izhar","M Rawat"],
-    },
-    "RCB": {
-        "name": "Royal Challengers Bengaluru", "short": "RCB",
-        "captain": "Rajat Patidar", "coach": "Andy Flower",
-        "home_ground": "M. Chinnaswamy Stadium, Bengaluru",
-        "primary_color": "#EC1C24", "secondary_color": "#2B2A29", "group": "A",
-        "key_players": ["Virat Kohli", "Rajat Patidar", "Phil Salt", "Bhuvneshwar Kumar", "Krunal Pandya"],
-        "squad_2026": ["V Kohli","RM Patidar","D Padikkal","PD Salt","B Kumar","KH Pandya","VR Iyer","JM Sharma","Suyash Sharma","S Singh","Abhinandan Singh","V Ostwal","R Salam","JA Duffy","TH David","R Shepherd","J Bethell","S Deswal","K Chouhan","V Malhotra","M Yadav"],
-    },
-    "KKR": {
-        "name": "Kolkata Knight Riders", "short": "KKR",
-        "captain": "Ajinkya Rahane", "coach": "Chandrakant Pandit",
-        "home_ground": "Eden Gardens, Kolkata",
-        "primary_color": "#7B5EA7", "secondary_color": "#D4A843", "group": "A",
-        "key_players": ["Ajinkya Rahane", "Sunil Narine", "Cameron Green", "Rinku Singh", "Varun Chakravarthy"],
-        "squad_2026": ["AM Rahane","SP Narine","C Green","RK Singh","CV Varun","A Raghuvanshi","FH Allen","Kartik Tyagi","Ramandeep Singh","AS Roy","B Muzarabani","VG Arora","MK Pandey","R Tripathi","RR Powell","R Ravindra","T Seifert","M Pathirana","U Malik","D Kamra","S Ranjan","S Dubey","N Saini","P Solanki"],
-    },
-    "SRH": {
-        "name": "Sunrisers Hyderabad", "short": "SRH",
-        "captain": "Pat Cummins", "coach": "Daniel Vettori",
-        "home_ground": "Rajiv Gandhi Intl. Stadium, Hyderabad",
-        "primary_color": "#FF822A", "secondary_color": "#000000", "group": "B",
-        "key_players": ["Pat Cummins", "Heinrich Klaasen", "Travis Head", "Abhishek Sharma", "Ishan Kishan"],
-        "squad_2026": ["PJ Cummins","H Klaasen","TM Head","Abhishek Sharma","Ishan Kishan","HV Patel","Nithish Kumar Reddy","L Livingstone","JD Unadkat","E Malinga","S Arora","Aniket Verma","DA Payne","Harsh Dubey","Shivang Kumar","B Carse","J Edwards","K Mendis","S Mavi","Z Ansari","K Fuletra","O Tarmale","A Kumar","S Hussain","P Hinge"],
-    },
-    "DC": {
-        "name": "Delhi Capitals", "short": "DC",
-        "captain": "Axar Patel", "coach": "Ricky Ponting",
-        "home_ground": "Arun Jaitley Stadium, Delhi",
-        "primary_color": "#17479E", "secondary_color": "#EF1B23", "group": "B",
-        "key_players": ["Axar Patel", "Kuldeep Yadav", "KL Rahul", "Mitchell Starc", "Tristan Stubbs"],
-        "squad_2026": ["AR Patel","KL Rahul","Kuldeep Yadav","MA Starc","T Stubbs","N Rana","P Nissanka","L Ngidi","Mukesh Kumar","T Natarajan","Sameer Rizvi","V Nigam","P Shaw","K Nair","A Sharma","S Parakh","A Porel","A Nabi","M Tiwari","T Vijay","A Mandal","D Chameera","D Miller","K Jamieson"],
-    },
-    "PBKS": {
-        "name": "Punjab Kings", "short": "PBKS",
-        "captain": "Shreyas Iyer", "coach": "Trevor Bayliss",
-        "home_ground": "New PCA Stadium, Mullanpur",
-        "primary_color": "#DD1F2D", "secondary_color": "#A7A9AC", "group": "A",
-        "key_players": ["Shreyas Iyer", "Arshdeep Singh", "Yuzvendra Chahal", "Marco Jansen", "Marcus Stoinis"],
-        "squad_2026": ["SS Iyer","Arshdeep Singh","YS Chahal","M Jansen","MP Stoinis","P Simran Singh","N Wadhera","Priyansh Arya","Shashank Singh","Vijaykumar Vyshak","XC Bartlett","C Connolly","H Brar","Musheer Khan","S Shedge","P Dubey","V Nishad","Y Thakur","A Omarzai","B Dwarshuis","M Owen","L Ferguson","H Singh","V Vishnu"],
-    },
-    "RR": {
-        "name": "Rajasthan Royals", "short": "RR",
-        "captain": "Riyan Parag", "coach": "Kumar Sangakkara",
-        "home_ground": "Sawai Mansingh Stadium, Jaipur",
-        "primary_color": "#EA1A85", "secondary_color": "#254AA5", "group": "A",
-        "key_players": ["Riyan Parag", "Yashasvi Jaiswal", "Ravindra Jadeja", "Jofra Archer", "Shimron Hetmyer"],
-        "squad_2026": ["R Parag","YBK Jaiswal","RA Jadeja","JC Archer","SO Hetmyer","Dhruv Jurel","V Suryavanshi","Sandeep Sharma","Ravi Bishnoi","N Burger","Brijesh Sharma","S Dubey","T Deshpande","A Rao","R Singh","Y Punja","V Puthur","S Mishra","K Sen","L Pretorius","D Ferreira","K Maphaka","A Milne","D Shanaka"],
-    },
-    "LSG": {
-        "name": "Lucknow Super Giants", "short": "LSG",
-        "captain": "Rishabh Pant", "coach": "Justin Langer",
-        "home_ground": "Ekana Cricket Stadium, Lucknow",
-        "primary_color": "#A72056", "secondary_color": "#FFCC00", "group": "B",
-        "key_players": ["Rishabh Pant", "Nicholas Pooran", "Mitchell Marsh", "Avesh Khan", "Mayank Yadav"],
-        "squad_2026": ["RR Pant","N Pooran","MR Marsh","AK Markram","A Nortje","A Badoni","Abdul Samad","Shahbaz Ahmed","Mohammed Shami","Mohsin Khan","Avesh Khan","Prince Yadav","MD Choudhary","H Singh","A Raghuwanshi","A Kulkarni","D Rathi","M Siddharth","A Singh","Mayank Yadav","N Tiwari","M Breetzke","J Inglis","W Hasaranga","A Tendulkar"],
-    },
-    "GT": {
-        "name": "Gujarat Titans", "short": "GT",
-        "captain": "Shubman Gill", "coach": "Ashish Nehra",
-        "home_ground": "Narendra Modi Stadium, Ahmedabad",
-        "primary_color": "#3EAFC9", "secondary_color": "#0B4973", "group": "B",
-        "key_players": ["Shubman Gill", "Rashid Khan", "Jos Buttler", "Kagiso Rabada", "Sai Sudharsan"],
-        "squad_2026": ["Shubman Gill","B Sai Sudharsan","Rashid Khan","K Rabada","JC Buttler","GD Phillips","Washington Sundar","R Tewatia","Mohammed Siraj","M Prasidh Krishna","M Shahrukh Khan","Ashok Sharma","A Rawat","K Kushagra","M Suthar","N Sindhu","J Yadav","A Khan","R Sai Kishore","G Brar","I Sharma","L Wood","T Banton","J Holder","K Khejroliya"],
-    },
-}
-
-SCHEDULE = [
-    {"match":1,"date":"2026-03-28","team1":"RCB","team2":"SRH","venue":"M. Chinnaswamy Stadium, Bengaluru","time":"19:30"},
-    {"match":2,"date":"2026-03-29","team1":"MI","team2":"KKR","venue":"Wankhede Stadium, Mumbai","time":"19:30"},
-    {"match":3,"date":"2026-03-30","team1":"RR","team2":"CSK","venue":"ACA Stadium, Guwahati","time":"19:30"},
-    {"match":4,"date":"2026-03-31","team1":"PBKS","team2":"GT","venue":"New PCA Stadium, Mullanpur","time":"19:30"},
-    {"match":5,"date":"2026-04-01","team1":"LSG","team2":"DC","venue":"Ekana Cricket Stadium, Lucknow","time":"19:30"},
-    {"match":6,"date":"2026-04-02","team1":"KKR","team2":"SRH","venue":"Eden Gardens, Kolkata","time":"19:30"},
-    {"match":7,"date":"2026-04-03","team1":"CSK","team2":"PBKS","venue":"M.A. Chidambaram Stadium, Chennai","time":"19:30"},
-    {"match":8,"date":"2026-04-04","team1":"DC","team2":"MI","venue":"Arun Jaitley Stadium, Delhi","time":"15:30"},
-    {"match":9,"date":"2026-04-04","team1":"GT","team2":"RR","venue":"Narendra Modi Stadium, Ahmedabad","time":"19:30"},
-    {"match":10,"date":"2026-04-05","team1":"SRH","team2":"LSG","venue":"Rajiv Gandhi Intl. Stadium, Hyderabad","time":"15:30"},
-    {"match":11,"date":"2026-04-05","team1":"RCB","team2":"CSK","venue":"M. Chinnaswamy Stadium, Bengaluru","time":"19:30"},
-    {"match":12,"date":"2026-04-06","team1":"KKR","team2":"PBKS","venue":"Eden Gardens, Kolkata","time":"19:30"},
-    {"match":13,"date":"2026-04-07","team1":"RR","team2":"MI","venue":"ACA Stadium, Guwahati","time":"19:30"},
-    {"match":14,"date":"2026-04-08","team1":"DC","team2":"GT","venue":"Arun Jaitley Stadium, Delhi","time":"19:30"},
-    {"match":15,"date":"2026-04-09","team1":"KKR","team2":"LSG","venue":"Eden Gardens, Kolkata","time":"19:30"},
-    {"match":16,"date":"2026-04-10","team1":"RR","team2":"RCB","venue":"ACA Stadium, Guwahati","time":"19:30"},
-    {"match":17,"date":"2026-04-11","team1":"PBKS","team2":"SRH","venue":"New PCA Stadium, Mullanpur","time":"15:30"},
-    {"match":18,"date":"2026-04-11","team1":"CSK","team2":"DC","venue":"M.A. Chidambaram Stadium, Chennai","time":"19:30"},
-    {"match":19,"date":"2026-04-12","team1":"LSG","team2":"GT","venue":"Ekana Cricket Stadium, Lucknow","time":"15:30"},
-    {"match":20,"date":"2026-04-12","team1":"MI","team2":"RCB","venue":"Wankhede Stadium, Mumbai","time":"19:30"},
-    {"match":21,"date":"2026-04-13","team1":"SRH","team2":"RR","venue":"Rajiv Gandhi Intl. Stadium, Hyderabad","time":"19:30"},
-    {"match":22,"date":"2026-04-14","team1":"DC","team2":"LSG","venue":"Arun Jaitley Stadium, Delhi","time":"19:30"},
-    {"match":23,"date":"2026-04-15","team1":"GT","team2":"KKR","venue":"Narendra Modi Stadium, Ahmedabad","time":"19:30"},
-    {"match":24,"date":"2026-04-16","team1":"MI","team2":"PBKS","venue":"Wankhede Stadium, Mumbai","time":"19:30"},
-    {"match":25,"date":"2026-04-17","team1":"CSK","team2":"RCB","venue":"M.A. Chidambaram Stadium, Chennai","time":"19:30"},
-    {"match":26,"date":"2026-04-18","team1":"RR","team2":"GT","venue":"Sawai Mansingh Stadium, Jaipur","time":"19:30"},
-    {"match":27,"date":"2026-04-19","team1":"LSG","team2":"SRH","venue":"Ekana Cricket Stadium, Lucknow","time":"15:30"},
-    {"match":28,"date":"2026-04-19","team1":"KKR","team2":"MI","venue":"Eden Gardens, Kolkata","time":"19:30"},
-    {"match":29,"date":"2026-04-20","team1":"DC","team2":"CSK","venue":"Arun Jaitley Stadium, Delhi","time":"19:30"},
-    {"match":30,"date":"2026-04-20","team1":"PBKS","team2":"RCB","venue":"New PCA Stadium, Mullanpur","time":"19:30"},
-    {"match":31,"date":"2026-04-21","team1":"SRH","team2":"GT","venue":"Rajiv Gandhi Intl. Stadium, Hyderabad","time":"19:30"},
-    {"match":32,"date":"2026-04-22","team1":"MI","team2":"CSK","venue":"Wankhede Stadium, Mumbai","time":"15:30"},
-    {"match":33,"date":"2026-04-22","team1":"RR","team2":"KKR","venue":"Sawai Mansingh Stadium, Jaipur","time":"19:30"},
-    {"match":34,"date":"2026-04-23","team1":"LSG","team2":"PBKS","venue":"Ekana Cricket Stadium, Lucknow","time":"19:30"},
-    {"match":35,"date":"2026-04-24","team1":"RCB","team2":"DC","venue":"M. Chinnaswamy Stadium, Bengaluru","time":"19:30"},
-    {"match":36,"date":"2026-04-25","team1":"GT","team2":"SRH","venue":"Narendra Modi Stadium, Ahmedabad","time":"19:30"},
-    {"match":37,"date":"2026-04-26","team1":"CSK","team2":"RR","venue":"M.A. Chidambaram Stadium, Chennai","time":"15:30"},
-    {"match":38,"date":"2026-04-26","team1":"KKR","team2":"LSG","venue":"Eden Gardens, Kolkata","time":"19:30"},
-    {"match":39,"date":"2026-04-27","team1":"MI","team2":"DC","venue":"Wankhede Stadium, Mumbai","time":"19:30"},
-    {"match":40,"date":"2026-04-27","team1":"PBKS","team2":"SRH","venue":"New PCA Stadium, Mullanpur","time":"19:30"},
-    {"match":41,"date":"2026-04-29","team1":"MI","team2":"SRH","venue":"Wankhede Stadium, Mumbai","time":"19:30"},
-    {"match":42,"date":"2026-04-30","team1":"GT","team2":"RCB","venue":"Narendra Modi Stadium, Ahmedabad","time":"19:30"},
-    {"match":43,"date":"2026-05-01","team1":"RR","team2":"DC","venue":"Sawai Mansingh Stadium, Jaipur","time":"19:30"},
-    {"match":44,"date":"2026-05-02","team1":"CSK","team2":"MI","venue":"M.A. Chidambaram Stadium, Chennai","time":"19:30"},
-    {"match":45,"date":"2026-05-03","team1":"SRH","team2":"KKR","venue":"Rajiv Gandhi Intl. Stadium, Hyderabad","time":"15:30"},
-    {"match":46,"date":"2026-05-03","team1":"GT","team2":"PBKS","venue":"Narendra Modi Stadium, Ahmedabad","time":"19:30"},
-    {"match":47,"date":"2026-05-04","team1":"MI","team2":"LSG","venue":"Wankhede Stadium, Mumbai","time":"19:30"},
-    {"match":48,"date":"2026-05-05","team1":"DC","team2":"CSK","venue":"Arun Jaitley Stadium, Delhi","time":"19:30"},
-    {"match":49,"date":"2026-05-06","team1":"SRH","team2":"PBKS","venue":"Rajiv Gandhi Intl. Stadium, Hyderabad","time":"19:30"},
-    {"match":50,"date":"2026-05-07","team1":"LSG","team2":"RCB","venue":"Ekana Cricket Stadium, Lucknow","time":"19:30"},
-    {"match":51,"date":"2026-05-08","team1":"DC","team2":"KKR","venue":"Arun Jaitley Stadium, Delhi","time":"19:30"},
-    {"match":52,"date":"2026-05-09","team1":"RR","team2":"GT","venue":"Sawai Mansingh Stadium, Jaipur","time":"19:30"},
-    {"match":53,"date":"2026-05-10","team1":"CSK","team2":"LSG","venue":"M.A. Chidambaram Stadium, Chennai","time":"15:30"},
-    {"match":54,"date":"2026-05-10","team1":"RCB","team2":"MI","venue":"Shaheed Veer Narayan Singh Stadium, Raipur","time":"19:30"},
-    {"match":55,"date":"2026-05-11","team1":"PBKS","team2":"DC","venue":"HPCA Stadium, Dharamsala","time":"19:30"},
-    {"match":56,"date":"2026-05-12","team1":"GT","team2":"SRH","venue":"Narendra Modi Stadium, Ahmedabad","time":"19:30"},
-    {"match":57,"date":"2026-05-13","team1":"RCB","team2":"KKR","venue":"Shaheed Veer Narayan Singh Stadium, Raipur","time":"19:30"},
-    {"match":58,"date":"2026-05-14","team1":"PBKS","team2":"MI","venue":"HPCA Stadium, Dharamsala","time":"19:30"},
-    {"match":59,"date":"2026-05-15","team1":"LSG","team2":"CSK","venue":"Ekana Cricket Stadium, Lucknow","time":"19:30"},
-    {"match":60,"date":"2026-05-16","team1":"KKR","team2":"GT","venue":"Eden Gardens, Kolkata","time":"19:30"},
-    {"match":61,"date":"2026-05-17","team1":"DC","team2":"PBKS","venue":"Arun Jaitley Stadium, Delhi","time":"19:30"},
-    {"match":62,"date":"2026-05-17","team1":"CSK","team2":"RR","venue":"M.A. Chidambaram Stadium, Chennai","time":"19:30"},
-    {"match":63,"date":"2026-05-18","team1":"LSG","team2":"MI","venue":"Ekana Cricket Stadium, Lucknow","time":"19:30"},
-    {"match":64,"date":"2026-05-18","team1":"RCB","team2":"SRH","venue":"M. Chinnaswamy Stadium, Bengaluru","time":"19:30"},
-    {"match":65,"date":"2026-05-19","team1":"GT","team2":"DC","venue":"Narendra Modi Stadium, Ahmedabad","time":"19:30"},
-    {"match":66,"date":"2026-05-19","team1":"KKR","team2":"PBKS","venue":"Eden Gardens, Kolkata","time":"19:30"},
-    {"match":67,"date":"2026-05-20","team1":"CSK","team2":"RCB","venue":"M.A. Chidambaram Stadium, Chennai","time":"19:30"},
-    {"match":68,"date":"2026-05-20","team1":"RR","team2":"LSG","venue":"Sawai Mansingh Stadium, Jaipur","time":"19:30"},
-    {"match":69,"date":"2026-05-21","team1":"MI","team2":"GT","venue":"Wankhede Stadium, Mumbai","time":"19:30"},
-    {"match":70,"date":"2026-05-24","team1":"DC","team2":"KKR","venue":"Arun Jaitley Stadium, Delhi","time":"19:30"},
-    {"match":71,"date":"2026-05-27","team1":"TBD","team2":"TBD","venue":"TBD","time":"19:30","stage":"Qualifier 1"},
-    {"match":72,"date":"2026-05-28","team1":"TBD","team2":"TBD","venue":"TBD","time":"19:30","stage":"Eliminator"},
-    {"match":73,"date":"2026-05-30","team1":"TBD","team2":"TBD","venue":"TBD","time":"19:30","stage":"Qualifier 2"},
-    {"match":74,"date":"2026-05-31","team1":"TBD","team2":"TBD","venue":"TBD","time":"19:30","stage":"Final"},
+# The four competitions we pull. The short code is what we use as a key inside
+# the JSON files, so keep these stable — the website reads the same codes.
+COMPETITIONS = [
+    {"code": "p", "name": "IPL",  "slug": "ipl",   "url": "https://cricsheet.org/downloads/ipl_male_csv2.zip"},
+    {"code": "t", "name": "Test", "slug": "tests", "url": "https://cricsheet.org/downloads/tests_male_csv2.zip"},
+    {"code": "o", "name": "ODI",  "slug": "odis",  "url": "https://cricsheet.org/downloads/odis_male_csv2.zip"},
+    {"code": "i", "name": "T20I", "slug": "t20s",  "url": "https://cricsheet.org/downloads/t20s_male_csv2.zip"},
 ]
 
-def load_official_schedule(default_schedule):
-    try:
-        with open(SCHEDULE_FILE, "r", encoding="utf-8") as f:
-            schedule = json.load(f)
-        if not isinstance(schedule, list) or not schedule:
-            raise ValueError("schedule file is empty or invalid")
-        return schedule
-    except Exception as exc:
-        print(f"⚠️  Failed to load official schedule from {SCHEDULE_FILE}: {exc}")
-        print("   Falling back to in-file schedule list.")
-        return default_schedule
+# Skip the download and reuse whatever is already unzipped in .cricsheet_raw.
+# Handy while developing; the GitHub Action always downloads fresh.
+reuse_downloaded_files = False
 
-SCHEDULE = load_official_schedule(SCHEDULE)
+# A batter-vs-bowler pairing needs at least this many balls before we keep it.
+# Anything smaller is noise and just bloats the data files.
+smallest_balls_for_a_matchup = 3
 
-# ─── CricSheet data fetcher ───────────────────────────────────────────────────
+# Ball-by-ball innings detail is only kept for pairings this size or larger.
+smallest_balls_for_innings_detail = 10
 
-def download_cricsheet():
-    print("⬇  Downloading CricSheet IPL data...")
-    os.makedirs(RAW_DIR, exist_ok=True)
-    resp = requests.get(CRICSHEET_URL, timeout=180)
-    resp.raise_for_status()
-    with zipfile.ZipFile(io.BytesIO(resp.content), "r") as zf:
-        zf.extractall(RAW_DIR)
-    print(f"   Extracted to {RAW_DIR}")
+# A batter-vs-team record needs at least this many balls to be kept.
+smallest_balls_for_a_team_record = 6
 
-def load_deliveries():
-    delivery_files = glob.glob(os.path.join(RAW_DIR, "[0-9]*.csv"))
-    delivery_files = [f for f in delivery_files if "_info" not in os.path.basename(f)]
+# Player data is split across this many files per keyed set, so the browser
+# only downloads the slice it needs. Keep it a power of two.
+number_of_shards = 128
+
+# A player counts as "active" for milestones if they played within this window.
+days_before_a_player_goes_inactive = 900
+
+# Milestone step sizes per competition: (runs step, wickets step).
+milestone_steps = {
+    "p": (500, 50),
+    "t": (1000, 50),
+    "o": (1000, 50),
+    "i": (500, 25),
+}
+
+# How close a player must be to count as imminent / on the watchlist.
+milestone_imminent_runs, milestone_watchlist_runs = 60, 250
+milestone_imminent_wickets, milestone_watchlist_wickets = 5, 20
+
+# Dismissals we credit to the bowler.
+BOWLER_WICKET_TYPES = {"bowled", "caught", "caught and bowled", "lbw", "stumped", "hit wicket"}
+
+# Columns we actually read out of the CricSheet CSVs.
+DELIVERY_COLUMNS = ["match_id", "innings", "start_date", "venue", "batting_team",
+                    "bowling_team", "striker", "bowler", "runs_off_bat", "extras",
+                    "wides", "wicket_type", "player_dismissed"]
+
+# Known IPL venue spellings collapsed into one name.
+IPL_VENUE_NAMES = {
+    "m.chinnaswamy stadium": "M. Chinnaswamy Stadium, Bengaluru",
+    "m chinnaswamy stadium": "M. Chinnaswamy Stadium, Bengaluru",
+    "wankhede stadium": "Wankhede Stadium, Mumbai",
+    "ma chidambaram stadium": "M.A. Chidambaram Stadium, Chennai",
+    "m a chidambaram stadium": "M.A. Chidambaram Stadium, Chennai",
+    "eden gardens": "Eden Gardens, Kolkata",
+    "rajiv gandhi international stadium": "Rajiv Gandhi Intl. Stadium, Hyderabad",
+    "arun jaitley stadium": "Arun Jaitley Stadium, Delhi",
+    "feroz shah kotla": "Arun Jaitley Stadium, Delhi",
+    "narendra modi stadium": "Narendra Modi Stadium, Ahmedabad",
+    "sardar patel stadium": "Narendra Modi Stadium, Ahmedabad",
+    "bharat ratna shri atal bihari vajpayee ekana cricket stadium": "Ekana Cricket Stadium, Lucknow",
+    "ekana cricket stadium": "Ekana Cricket Stadium, Lucknow",
+    "sawai mansingh stadium": "Sawai Mansingh Stadium, Jaipur",
+    "punjab cricket association is bindra stadium": "PCA Stadium, Mohali",
+    "punjab cricket association stadium": "PCA Stadium, Mohali",
+    "maharaja yadavindra singh international cricket stadium": "New PCA Stadium, Mullanpur",
+    "himachal pradesh cricket association stadium": "HPCA Stadium, Dharamsala",
+    "barsapara cricket stadium": "ACA Stadium, Guwahati",
+    "shaheed veer narayan singh international stadium": "SVN Stadium, Raipur",
+    "dr y s rajasekhara reddy aca vdca cricket stadium": "ACA-VDCA Stadium, Visakhapatnam",
+    "dr dy patil sports academy": "DY Patil Stadium, Navi Mumbai",
+    "maharashtra cricket association stadium": "MCA Stadium, Pune",
+    "subrata roy sahara stadium": "MCA Stadium, Pune",
+    "brabourne stadium": "Brabourne Stadium, Mumbai",
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Downloading and reading CricSheet files
+# ══════════════════════════════════════════════════════════════════════════════
+
+def download_competition(comp):
+    folder = os.path.join(RAW_DIR, comp["slug"])
+    if reuse_downloaded_files and os.path.isdir(folder) and os.listdir(folder):
+        print(f"   reusing already-downloaded {comp['name']} files")
+        return folder
+
+    import requests
+    print(f"⬇  downloading {comp['name']} data...")
+    response = requests.get(comp["url"], timeout=600)
+    response.raise_for_status()
+    # Start from an empty folder so a match withdrawn upstream does not linger.
+    if os.path.isdir(folder):
+        shutil.rmtree(folder)
+    os.makedirs(folder, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(response.content), "r") as archive:
+        archive.extractall(folder)
+    return folder
+
+
+def read_deliveries(folder):
+    # One file per match, named after the match id. Some archives also ship an
+    # all_matches.csv holding the same deliveries again, so only take the
+    # numbered files or every ball would be counted twice.
+    paths = [p for p in glob.glob(os.path.join(folder, "*.csv"))
+             if os.path.basename(p)[:-4].isdigit()]
     frames = []
-    for fp in delivery_files:
-        try: frames.append(pd.read_csv(fp, low_memory=False))
-        except: continue
-    if not frames: raise RuntimeError("No delivery files found")
-    df = pd.concat(frames, ignore_index=True)
-    df = df[df["innings"].isin([1, 2])]
-    df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce")
-    return df
-
-def load_match_info():
-    info_files = glob.glob(os.path.join(RAW_DIR, "*_info.csv"))
-    rows = []
-    for fp in info_files:
-        mid = os.path.basename(fp).replace("_info.csv", "")
+    for path in paths:
         try:
-            with open(fp, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    parts = line.strip().split(",", 3)
-                    if len(parts) >= 3 and parts[0] == "info":
-                        rows.append({"match_id": mid, "field": parts[1],
-                                     "value": parts[2] if len(parts) == 3 else ",".join(parts[2:])})
-        except: continue
-    return pd.DataFrame(rows)
-
-# ─── Builders ─────────────────────────────────────────────────────────────────
-
-def build_h2h(info_df):
-    print("🏏 Building H2H data...")
-    winners = info_df[info_df["field"] == "winner"][["match_id", "value"]].copy()
-    winners.columns = ["match_id", "winner"]
-    teams = info_df[info_df["field"] == "team"][["match_id", "value"]].copy()
-    teams.columns = ["match_id", "team"]
-    match_teams = teams.groupby("match_id")["team"].apply(list).reset_index()
-    match_teams = match_teams[match_teams["team"].apply(len) == 2]
-    outcomes = info_df[info_df["field"] == "outcome"][["match_id", "value"]].copy()
-    outcomes.columns = ["match_id", "outcome"]
-    merged = match_teams.merge(winners, on="match_id", how="left").merge(outcomes, on="match_id", how="left")
-
-    # Also get margins, dates, venues, seasons for match results
-    def _ext(field):
-        sub = info_df[info_df["field"] == field][["match_id", "value"]].copy()
-        sub.columns = ["match_id", field]
-        sub["match_id"] = sub["match_id"].astype(str)
-        return sub
-    winner_runs = _ext("winner_runs")
-    winner_wickets = _ext("winner_wickets")
-    dates = _ext("date")
-    venues = _ext("venue")
-    seasons = _ext("season")
-    merged["match_id"] = merged["match_id"].astype(str)
-    for extra in [winner_runs, winner_wickets, dates, venues, seasons]:
-        merged = merged.merge(extra, on="match_id", how="left")
-
-    h2h = {}
-    for _, row in merged.iterrows():
-        t1_full, t2_full = row["team"][0], row["team"][1]
-        t1, t2 = _code(t1_full), _code(t2_full)
-        if t1 not in CURRENT_TEAMS or t2 not in CURRENT_TEAMS: continue
-        key = "_".join(sorted([t1, t2]))
-        if key not in h2h:
-            h2h[key] = {"team1": sorted([t1,t2])[0], "team2": sorted([t1,t2])[1],
-                        "team1_wins": 0, "team2_wins": 0, "no_result": 0, "total": 0, "results": []}
-        rec = h2h[key]
-        rec["total"] += 1
-        winner = row.get("winner")
-        w_code = _code(winner) if pd.notna(winner) else None
-        if w_code == rec["team1"]: rec["team1_wins"] += 1
-        elif w_code == rec["team2"]: rec["team2_wins"] += 1
-        else: rec["no_result"] += 1
-
-        margin = ""
-        if pd.notna(row.get("winner_runs")): margin = f"by {int(float(row['winner_runs']))} runs"
-        elif pd.notna(row.get("winner_wickets")): margin = f"by {int(float(row['winner_wickets']))} wickets"
-        result_text = f"{w_code} won {margin}" if w_code else "No result"
-        raw_date = str(row.get("date", "")).replace("/", "-")
-
-        rec["results"].append({
-            "date": raw_date, "season": str(row.get("season", "")),
-            "venue": str(row.get("venue", "")), "winner": w_code or "",
-            "margin": margin, "result_text": result_text,
-        })
-
-    for rec in h2h.values():
-        rec["results"].sort(key=lambda r: r["date"], reverse=True)
-    return h2h
-
-def build_venues(df, info_df):
-    print("🏟  Building venue stats...")
-    df["total_runs"] = df["runs_off_bat"].fillna(0) + df["extras"].fillna(0)
-    inn_tot = df.groupby(["match_id","innings"]).agg(runs=("total_runs","sum"), venue=("venue","first")).reset_index()
-    inn_tot["venue_norm"] = inn_tot["venue"].apply(_norm_venue)
-    avg_first = inn_tot[inn_tot["innings"]==1].groupby("venue_norm")["runs"].mean()
-    avg_second = inn_tot[inn_tot["innings"]==2].groupby("venue_norm")["runs"].mean()
-
-    winners = info_df[info_df["field"]=="winner"][["match_id","value"]].copy()
-    winners.columns = ["match_id","winner"]; winners["match_id"] = winners["match_id"].astype(str)
-    toss_dec = info_df[info_df["field"]=="toss_decision"][["match_id","value"]].copy()
-    toss_dec.columns = ["match_id","toss_decision"]; toss_dec["match_id"] = toss_dec["match_id"].astype(str)
-    toss_win = info_df[info_df["field"]=="toss_winner"][["match_id","value"]].copy()
-    toss_win.columns = ["match_id","toss_winner"]; toss_win["match_id"] = toss_win["match_id"].astype(str)
-    mt = info_df[info_df["field"]=="team"][["match_id","value"]].copy()
-    mt.columns = ["match_id","team"]; mt["match_id"] = mt["match_id"].astype(str)
-    match_teams = mt.groupby("match_id")["team"].apply(list).reset_index()
-    match_teams = match_teams[match_teams["team"].apply(len)==2]
-
-    meta = match_teams.merge(toss_win, on="match_id", how="left").merge(toss_dec, on="match_id", how="left").merge(winners, on="match_id", how="left")
-    mv = df.drop_duplicates("match_id")[["match_id","venue"]].copy()
-    mv["match_id"] = mv["match_id"].astype(str)
-    mv["venue_norm"] = mv["venue"].apply(_norm_venue)
-    meta = meta.merge(mv[["match_id","venue_norm"]], on="match_id", how="left")
-
-    def _bf(row):
-        tl = row["team"]; tw = row.get("toss_winner"); td = row.get("toss_decision")
-        if pd.isna(tw) or pd.isna(td): return tl[0]
-        return tw if td == "bat" else ([t for t in tl if t != tw][0] if len(tl)==2 else tl[0])
-    meta["bat_first"] = meta.apply(_bf, axis=1)
-
-    vr = {}
-    for _, row in meta.iterrows():
-        v = row.get("venue_norm")
-        if pd.isna(v) or v == "Unknown": continue
-        w = row.get("winner"); bf = row.get("bat_first")
-        if pd.isna(w) or pd.isna(bf): continue
-        if v not in vr: vr[v] = {"matches":0,"bat_first_wins":0,"bat_second_wins":0}
-        vr[v]["matches"] += 1
-        if w == bf: vr[v]["bat_first_wins"] += 1
-        else: vr[v]["bat_second_wins"] += 1
-
-    venues = {}
-    for v, rec in vr.items():
-        total = rec["matches"]; bf_w = rec["bat_first_wins"]; bs_w = rec["bat_second_wins"]
-        bf_pct = round(bf_w/total*100,1) if total else 50
-        bs_pct = round(bs_w/total*100,1) if total else 50
-        a1 = int(round(avg_first.get(v,165))); a2 = int(round(avg_second.get(v,155)))
-        nature = "Defend-Friendly" if bf_pct > 53 else ("Chase-Friendly" if bs_pct > 53 else "Balanced")
-        venues[v] = {"matches":total,"bat_first_wins":bf_w,"bat_second_wins":bs_w,
-                      "bat_first_pct":bf_pct,"bat_second_pct":bs_pct,
-                      "avg_1st_innings":a1,"avg_2nd_innings":a2,"nature":nature}
-    return venues
-
-def build_bvb(df):
-    print("⚡ Building batter vs bowler data...")
-    df["is_bowler_wicket"] = df["wicket_type"].isin(BOWLER_WKT_TYPES).astype(int)
-    df["is_dot"] = (df["runs_off_bat"]==0).astype(int)
-    df["is_four"] = (df["runs_off_bat"]==4).astype(int)
-    df["is_six"] = (df["runs_off_bat"]==6).astype(int)
-    df["is_legal"] = df["wides"].isna().astype(int)
-
-    agg = df.groupby(["striker","bowler"]).agg(
-        balls=("is_legal","sum"), runs=("runs_off_bat","sum"),
-        dismissals=("is_bowler_wicket","sum"), dots=("is_dot","sum"),
-        fours=("is_four","sum"), sixes=("is_six","sum"),
-    ).reset_index()
-    agg = agg[agg["balls"] >= 1].copy()
-    agg["sr"] = (agg["runs"]/agg["balls"]*100).round(1)
-    agg["avg"] = agg.apply(lambda r: round(r["runs"]/r["dismissals"],1) if r["dismissals"]>0 else 0, axis=1)
-
-    bvb_list = []
-    for _, r in agg.iterrows():
-        bvb_list.append({
-            "batter": r["striker"], "bowler": r["bowler"],
-            "balls": int(r["balls"]), "runs": int(r["runs"]),
-            "dismissals": int(r["dismissals"]), "dots": int(r["dots"]),
-            "fours": int(r["fours"]), "sixes": int(r["sixes"]),
-            "sr": float(r["sr"]), "avg": float(r["avg"]),
-        })
-
-    # innings breakdown for matchups with >= 3 balls
-    print("📋 Building BvB innings breakdowns...")
-    sig = agg[agg["balls"] >= 3][["striker","bowler"]].values.tolist()
-    sig_set = {(s,b) for s,b in sig}
-
-    innings_map = {}
-    for (mid, inn, striker, bowler), grp in df.groupby(["match_id","innings","striker","bowler"]):
-        if (striker, bowler) not in sig_set: continue
-        key = f"{striker}__{bowler}"
-        grp_legal = grp[grp["wides"].isna()]
-        inn_date = str(grp["start_date"].iloc[0]).split(" ")[0] if "start_date" in grp.columns else ""
-        inn_venue = str(grp["venue"].iloc[0]) if "venue" in grp.columns else ""
-        entry = {
-            "runs": int(grp["runs_off_bat"].sum()), "balls": len(grp_legal),
-            "dismissed": int(grp["wicket_type"].isin(BOWLER_WKT_TYPES).sum()) > 0,
-            "date": inn_date, "venue": inn_venue,
-            "fours": int((grp["runs_off_bat"]==4).sum()),
-            "sixes": int((grp["runs_off_bat"]==6).sum()),
-        }
-        innings_map.setdefault(key, []).append(entry)
-
-    for v in innings_map.values():
-        v.sort(key=lambda x: x["date"], reverse=True)
-
-    return bvb_list, innings_map
-
-def build_batter_team(df):
-    print("🏏 Building batter vs team data...")
-    df["bowling_team_code"] = df["bowling_team"].map(_code)
-    df["is_bowler_wicket"] = df["wicket_type"].isin(BOWLER_WKT_TYPES).astype(int)
-    df["is_legal"] = df["wides"].isna().astype(int)
-
-    result = {}
-    for (batter, bt_code), grp in df.groupby(["striker","bowling_team_code"]):
-        if bt_code not in CURRENT_TEAMS: continue
-        legal = grp[grp["wides"].isna()]
-        balls = len(legal); runs = int(grp["runs_off_bat"].sum())
-        if balls < 6: continue
-        dismissals = int(grp["wicket_type"].isin(BOWLER_WKT_TYPES).sum())
-        dots = int((legal["runs_off_bat"]==0).sum())
-        fours = int((grp["runs_off_bat"]==4).sum())
-        sixes = int((grp["runs_off_bat"]==6).sum())
-        sr = round(runs/balls*100, 1) if balls else 0
-        avg = round(runs/dismissals, 1) if dismissals > 0 else 0
-        matches = grp["match_id"].nunique()
-
-        innings = []
-        for (mid, inn), ig in grp.groupby(["match_id","innings"]):
-            ig_legal = ig[ig["wides"].isna()]
-            i_date = str(ig["start_date"].iloc[0]).split(" ")[0] if "start_date" in ig.columns else ""
-            i_venue = str(ig["venue"].iloc[0]) if "venue" in ig.columns else ""
-            innings.append({
-                "runs": int(ig["runs_off_bat"].sum()), "balls": len(ig_legal),
-                "dismissed": int(ig["wicket_type"].isin(BOWLER_WKT_TYPES).sum()) > 0,
-                "date": i_date, "venue": i_venue,
-                "fours": int((ig["runs_off_bat"]==4).sum()),
-                "sixes": int((ig["runs_off_bat"]==6).sum()),
-            })
-        innings.sort(key=lambda x: x["date"], reverse=True)
-
-        result[f"{batter}__{bt_code}"] = {
-            "batter": batter, "team": bt_code, "balls": balls, "runs": runs,
-            "dismissals": dismissals, "dots": dots, "fours": fours, "sixes": sixes,
-            "sr": sr, "avg": avg, "matches": matches, "innings": innings,
-        }
-    return result
-
-def build_milestones(df):
-    print("🎯 Building milestones...")
-    df["is_legal"] = df["wides"].isna().astype(int)
-    df["is_bowler_wicket"] = df["wicket_type"].isin(BOWLER_WKT_TYPES).astype(int)
-
-    player_to_team = {}
-    for code, meta in TEAMS.items():
-        for name in meta.get("squad_2026", []):
-            player_to_team[name] = code
-
-    bat = df.groupby("striker").agg(total_runs=("runs_off_bat","sum")).reset_index()
-    bat = bat[bat["striker"].isin(player_to_team)].copy()
-    bat["team"] = bat["striker"].map(player_to_team)
-
-    bowl = df.groupby("bowler").agg(wickets=("is_bowler_wicket","sum")).reset_index()
-    bowl = bowl[bowl["bowler"].isin(player_to_team)].copy()
-    bowl["team"] = bowl["bowler"].map(player_to_team)
-
-    milestones, watchlist = [], []
-    for _, r in bat.iterrows():
-        val = int(r["total_runs"])
-        if val < 450: continue
-        nxt = ((val//500)+1)*500; needed = nxt - val
-        entry = {"player":r["striker"],"team":r["team"],"milestone":f"{nxt:,} IPL Runs",
-                 "current":f"{val:,} runs","needed":f"{needed} runs","icon":"🏏",
-                 "detail":f"Currently at {val:,}, needs {needed} more to reach {nxt:,}",
-                 "_n":needed}
-        if needed <= 50: milestones.append(entry)
-        elif needed <= 200: watchlist.append(entry)
-
-    for _, r in bowl.iterrows():
-        val = int(r["wickets"])
-        if val < 45: continue
-        nxt = ((val//50)+1)*50; needed = nxt - val
-        entry = {"player":r["bowler"],"team":r["team"],"milestone":f"{nxt} IPL Wickets",
-                 "current":f"{val} wickets","needed":f"{needed} wickets","icon":"🪵",
-                 "detail":f"Currently at {val}, needs {needed} more to reach {nxt}",
-                 "_n":needed}
-        if needed <= 5: milestones.append(entry)
-        elif needed <= 20: watchlist.append(entry)
-
-    milestones.sort(key=lambda m: m["_n"])
-    watchlist.sort(key=lambda m: m["_n"])
-    for m in milestones: m.pop("_n")
-    for m in watchlist: m.pop("_n"); m["icon"] = "👀"
-    return {"imminent": milestones[:15], "watchlist": watchlist[:15]}
-
-# ─── Points Table (2026 Season) ────────────────────────────────────────────────
-
-def build_points_table(df, info_df):
-    print("🏆 Building 2026 points table...")
-    df_2026 = df[df["start_date"].dt.year == 2026].copy()
-    if df_2026.empty:
-        return {"standings": [], "team_results": {}}
-
-    df_2026["total_runs"] = df_2026["runs_off_bat"].fillna(0) + df_2026["extras"].fillna(0)
-    df_2026["is_legal"] = df_2026["wides"].isna() & df_2026["noballs"].isna()
-
-    # Per-team per-match aggregation for NRR
-    match_team_stats = {}
-    for (mid, inn, bat_team), grp in df_2026.groupby(["match_id", "innings", "batting_team"]):
-        key = (str(mid), _code(bat_team))
-        runs = int(grp["total_runs"].sum())
-        legal = grp["is_legal"].sum()
-        overs = legal / 6
-        # Check if all out (last wicket in innings)
-        all_out = grp["wicket_type"].notna().sum()
-        max_ball = grp["ball"].max() if "ball" in grp.columns else 0
-        match_team_stats.setdefault(str(mid), {})[_code(bat_team)] = {
-            "runs_scored": runs, "overs_faced": round(overs, 1),
-        }
-
-    # Get match-level info for 2026
-    info_2026_ids = set(df_2026["match_id"].astype(str).unique())
-    rel_info = info_df[info_df["match_id"].astype(str).isin(info_2026_ids)]
-
-    def _get(field):
-        sub = rel_info[rel_info["field"] == field][["match_id", "value"]].copy()
-        sub.columns = ["match_id", field]
-        sub["match_id"] = sub["match_id"].astype(str)
-        return sub
-
-    winners = _get("winner")
-    dates = _get("date")
-    venues = _get("venue")
-    teams_info = rel_info[rel_info["field"] == "team"][["match_id", "value"]].copy()
-    teams_info.columns = ["match_id", "team"]
-    teams_info["match_id"] = teams_info["match_id"].astype(str)
-    match_teams = teams_info.groupby("match_id")["team"].apply(list).reset_index()
-    match_teams = match_teams[match_teams["team"].apply(len) == 2]
-    winner_runs = _get("winner_runs")
-    winner_wickets = _get("winner_wickets")
-    outcomes = _get("outcome")
-
-    base = match_teams.copy()
-    for extra in [winners, dates, venues, winner_runs, winner_wickets, outcomes]:
-        base = base.merge(extra, on="match_id", how="left")
-
-    # Build standings and results
-    standings = {}
-    team_results = {}
-
-    for _, row in base.iterrows():
-        mid = row["match_id"]
-        t1_full, t2_full = row["team"][0], row["team"][1]
-        t1, t2 = _code(t1_full), _code(t2_full)
-        if t1 not in CURRENT_TEAMS or t2 not in CURRENT_TEAMS:
+            frames.append(pd.read_csv(path, usecols=DELIVERY_COLUMNS, low_memory=False))
+        except Exception:
             continue
+    if not frames:
+        raise RuntimeError(f"no delivery files found in {folder}")
+    deliveries = pd.concat(frames, ignore_index=True)
+    deliveries["match_id"] = deliveries["match_id"].astype(str)
+    deliveries["start_date"] = pd.to_datetime(deliveries["start_date"], errors="coerce")
+    return deliveries
 
-        for t in [t1, t2]:
-            if t not in standings:
-                standings[t] = {"team": t, "p": 0, "w": 0, "l": 0, "nr": 0, "pts": 0,
-                                "nrr_for_runs": 0, "nrr_for_overs": 0,
-                                "nrr_against_runs": 0, "nrr_against_overs": 0}
 
-        winner_full = row.get("winner")
-        w_code = _code(winner_full) if pd.notna(winner_full) else None
+def read_match_results(folder):
+    """Winner and match date for every match, pulled from the *_info.csv files."""
+    results = {}
+    for path in glob.glob(os.path.join(folder, "*_info.csv")):
+        match_id = os.path.basename(path).replace("_info.csv", "")
+        record = {"winner": None, "season": None}
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    parts = line.rstrip("\n").split(",")
+                    if len(parts) < 3 or parts[0] != "info":
+                        continue
+                    field, value = parts[1], ",".join(parts[2:]).strip()
+                    if field in ("winner", "season"):
+                        record[field] = value
+        except Exception:
+            continue
+        results[match_id] = record
+    return results
 
-        standings[t1]["p"] += 1
-        standings[t2]["p"] += 1
 
-        if w_code and w_code in (t1, t2):
-            loser = t2 if w_code == t1 else t1
-            standings[w_code]["w"] += 1
-            standings[w_code]["pts"] += 2
-            standings[loser]["l"] += 1
+# ══════════════════════════════════════════════════════════════════════════════
+# Adding the helper columns we aggregate on
+# ══════════════════════════════════════════════════════════════════════════════
+
+def add_helper_columns(deliveries):
+    runs = deliveries["runs_off_bat"].fillna(0)
+    deliveries["runs_off_bat"] = runs
+
+    deliveries["legal"] = deliveries["wides"].isna().astype("int32")
+    deliveries["four"] = (runs == 4).astype("int32")
+    deliveries["six"] = (runs == 6).astype("int32")
+    deliveries["dot"] = ((runs == 0) & deliveries["wides"].isna()).astype("int32")
+
+    credited = deliveries["wicket_type"].isin(BOWLER_WICKET_TYPES)
+    struck_out = deliveries["player_dismissed"] == deliveries["striker"]
+    deliveries["bowler_wicket"] = (credited & struck_out).astype("int32")
+
+    spellings = set(deliveries["bowling_team"].dropna().unique())
+    spellings.update(deliveries["batting_team"].dropna().unique())
+    team_ids = {name: canonical_team(name) for name in spellings}
+    deliveries["bowling_team_id"] = deliveries["bowling_team"].map(team_ids)
+    deliveries["batting_team_id"] = deliveries["batting_team"].map(team_ids)
+    deliveries["match_date"] = deliveries["start_date"].dt.strftime("%Y-%m-%d")
+    return deliveries
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Aggregating
+# ══════════════════════════════════════════════════════════════════════════════
+
+def aggregate_batter_vs_bowler(deliveries):
+    grouped = deliveries.groupby(["striker", "bowler"], sort=False).agg(
+        balls=("legal", "sum"),
+        runs=("runs_off_bat", "sum"),
+        outs=("bowler_wicket", "sum"),
+        dots=("dot", "sum"),
+        fours=("four", "sum"),
+        sixes=("six", "sum"),
+    ).reset_index()
+    grouped = grouped[grouped["balls"] >= smallest_balls_for_a_matchup]
+    return grouped
+
+
+def aggregate_batter_vs_team(deliveries):
+    grouped = deliveries.groupby(["striker", "bowling_team_id"], sort=False).agg(
+        balls=("legal", "sum"),
+        runs=("runs_off_bat", "sum"),
+        outs=("bowler_wicket", "sum"),
+        dots=("dot", "sum"),
+        fours=("four", "sum"),
+        sixes=("six", "sum"),
+        matches=("match_id", "nunique"),
+    ).reset_index()
+    grouped = grouped[grouped["balls"] >= smallest_balls_for_a_team_record]
+    return grouped
+
+
+def aggregate_innings(deliveries, keep_pairs):
+    grouped = deliveries.groupby(["striker", "bowler", "match_id", "innings"], sort=False).agg(
+        runs=("runs_off_bat", "sum"),
+        balls=("legal", "sum"),
+        outs=("bowler_wicket", "max"),
+        fours=("four", "sum"),
+        sixes=("six", "sum"),
+        date=("match_date", "first"),
+        venue=("venue", "first"),
+    ).reset_index()
+
+    return grouped.merge(keep_pairs, on=["striker", "bowler"], how="inner")
+
+
+def aggregate_player_totals(deliveries):
+    """Career runs / wickets / last-played date, used for the milestones page."""
+    batting = deliveries.groupby("striker", sort=False).agg(
+        runs=("runs_off_bat", "sum"),
+        balls=("legal", "sum"),
+        last_played=("match_date", "max"),
+    ).reset_index()
+
+    bowling = deliveries.groupby("bowler", sort=False).agg(
+        wickets=("bowler_wicket", "sum"),
+        last_played=("match_date", "max"),
+    ).reset_index()
+
+    # The team a player most recently turned out for, for the badge on the row.
+    recent = deliveries.sort_values("start_date").drop_duplicates("striker", keep="last")
+    batter_team = dict(zip(recent["striker"], recent["batting_team_id"]))
+    recent_bowl = deliveries.sort_values("start_date").drop_duplicates("bowler", keep="last")
+    bowler_team = dict(zip(recent_bowl["bowler"], recent_bowl["bowling_team_id"]))
+
+    return batting, bowling, batter_team, bowler_team
+
+
+def aggregate_venue_stats(deliveries, match_results):
+    """Per-venue innings totals and bat-first / chasing win counts."""
+    deliveries["all_runs"] = deliveries["runs_off_bat"] + deliveries["extras"].fillna(0)
+
+    per_innings = deliveries.groupby(["match_id", "innings"], sort=False).agg(
+        runs=("all_runs", "sum"),
+        venue=("venue", "first"),
+        batting_team_id=("batting_team_id", "first"),
+    ).reset_index()
+
+    first_innings = per_innings[per_innings["innings"] == 1]
+    second_innings = per_innings[per_innings["innings"] == 2]
+
+    stats = defaultdict(lambda: {"matches": 0, "first_runs": 0, "first_count": 0,
+                                 "second_runs": 0, "second_count": 0,
+                                 "bat_first_wins": 0, "chase_wins": 0})
+
+    for row in first_innings.itertuples(index=False):
+        entry = stats[row.venue]
+        entry["matches"] += 1
+        entry["first_runs"] += int(row.runs)
+        entry["first_count"] += 1
+
+        winner = match_results.get(row.match_id, {}).get("winner")
+        winner_id = canonical_team(winner) if winner else None
+        if winner_id:
+            if winner_id == row.batting_team_id:
+                entry["bat_first_wins"] += 1
+            else:
+                entry["chase_wins"] += 1
+
+    for row in second_innings.itertuples(index=False):
+        entry = stats[row.venue]
+        entry["second_runs"] += int(row.runs)
+        entry["second_count"] += 1
+
+    return stats
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Venue name clean-up
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_venue_name_map(raw_names):
+    """
+    Collapse the different spellings CricSheet uses for one ground.
+
+    Two spellings are treated as the same ground when the part before the first
+    comma matches and they do not name two different cities after it.
+    """
+    mapped = {}
+    remaining = []
+
+    for raw in raw_names:
+        if not raw or str(raw) == "nan":
+            continue
+        plain = _plain(raw)
+        matched = None
+        for pattern, canonical in IPL_VENUE_NAMES.items():
+            if pattern in plain:
+                matched = canonical
+                break
+        if matched:
+            mapped[raw] = matched
         else:
-            standings[t1]["nr"] += 1
-            standings[t2]["nr"] += 1
-            standings[t1]["pts"] += 1
-            standings[t2]["pts"] += 1
+            remaining.append(raw)
 
-        # NRR components
-        mts = match_team_stats.get(mid, {})
-        for t, opp in [(t1, t2), (t2, t1)]:
-            my = mts.get(t, {})
-            their = mts.get(opp, {})
-            standings[t]["nrr_for_runs"] += my.get("runs_scored", 0)
-            standings[t]["nrr_for_overs"] += my.get("overs_faced", 0)
-            standings[t]["nrr_against_runs"] += their.get("runs_scored", 0)
-            standings[t]["nrr_against_overs"] += their.get("overs_faced", 0)
+    groups = defaultdict(list)
+    for raw in remaining:
+        head = str(raw).split(",")[0]
+        groups[_plain(head)].append(raw)
 
-        # Build result entries for each team
-        margin = ""
-        if pd.notna(row.get("winner_runs")):
-            margin = f"by {int(float(row['winner_runs']))} runs"
-        elif pd.notna(row.get("winner_wickets")):
-            margin = f"by {int(float(row['winner_wickets']))} wickets"
-        result_text = f"{w_code} won {margin}" if w_code else "No result"
-        raw_date = str(row.get("date", "")).replace("/", "-")
-        venue = str(row.get("venue", ""))
+    for members in groups.values():
+        cities = set()
+        for raw in members:
+            parts = str(raw).split(",")
+            if len(parts) > 1:
+                cities.add(_plain(parts[-1]))
+        if len(cities) > 1:
+            # Genuinely different grounds that happen to share a name.
+            for raw in members:
+                mapped[raw] = str(raw).strip()
+        else:
+            keeper = sorted(members, key=lambda n: (-len(str(n)), str(n)))[0]
+            for raw in members:
+                mapped[raw] = str(keeper).strip()
 
-        for t, opp in [(t1, t2), (t2, t1)]:
-            won = w_code == t
-            lost = w_code is not None and w_code != t
-            team_results.setdefault(t, []).append({
-                "date": raw_date, "opponent": opp, "venue": venue,
-                "result": "W" if won else ("L" if lost else "NR"),
-                "result_text": result_text, "margin": margin,
-            })
-
-    # Compute NRR
-    for s in standings.values():
-        nrr_for = (s["nrr_for_runs"] / s["nrr_for_overs"]) if s["nrr_for_overs"] > 0 else 0
-        nrr_against = (s["nrr_against_runs"] / s["nrr_against_overs"]) if s["nrr_against_overs"] > 0 else 0
-        s["nrr"] = round(nrr_for - nrr_against, 3)
-        del s["nrr_for_runs"], s["nrr_for_overs"], s["nrr_against_runs"], s["nrr_against_overs"]
-
-    # Sort: pts desc, nrr desc, w desc
-    sorted_standings = sorted(standings.values(), key=lambda x: (-x["pts"], -x["nrr"], -x["w"]))
-
-    # Sort each team's results by date desc
-    for t in team_results:
-        team_results[t].sort(key=lambda x: x["date"], reverse=True)
-
-    return {"standings": sorted_standings, "team_results": team_results}
+    return mapped
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Writing the output files
+# ══════════════════════════════════════════════════════════════════════════════
+
+def shard_for(name):
+    """Which file a player's data lives in. Stable, so unchanged players keep
+    the same file and the daily commit stays small."""
+    return zlib.crc32(str(name).encode("utf-8")) % number_of_shards
+
+
+def write_json(relative_path, payload):
+    path = os.path.join(DATA_DIR, relative_path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+    return os.path.getsize(path)
+
+
+def write_sharded(folder, contents_by_name):
+    """Group per-player payloads into shard files and write them out."""
+    shards = defaultdict(dict)
+    for name, payload in contents_by_name.items():
+        shards[shard_for(name)][name] = payload
+
+    target = os.path.join(DATA_DIR, folder)
+    if os.path.isdir(target):
+        shutil.rmtree(target)
+
+    total = 0
+    for shard_id in range(number_of_shards):
+        total += write_json(f"{folder}/{shard_id}.json", shards.get(shard_id, {}))
+    print(f"   📁 {folder}/  ({number_of_shards} files, {total/1024/1024:.1f} MB)")
+    return total
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main
+# ══════════════════════════════════════════════════════════════════════════════
 
 def main():
     os.makedirs(DATA_DIR, exist_ok=True)
-    download_cricsheet()
-    print("📊 Loading data...")
-    df = load_deliveries()
-    info_df = load_match_info()
-    print(f"   {len(df):,} deliveries, {len(info_df):,} info rows")
 
-    # Static data
+    matchup_totals = defaultdict(dict)      # (batter, bowler) -> {code: [6 numbers]}
+    team_totals = defaultdict(dict)         # (batter, team)   -> {code: [7 numbers]}
+    innings_rows = defaultdict(dict)        # (batter, bowler) -> {code: [rows]}
+    venue_totals = {}                       # code -> {raw venue: counters}
+    player_totals = {}                      # code -> (batting, bowling, teams)
+    match_counts = {}
+    raw_venue_names = set()
+    raw_team_names = set()
+    seen_team_ids = set()
+
+    for comp in COMPETITIONS:
+        code = comp["code"]
+        folder = download_competition(comp)
+
+        print(f"📊 reading {comp['name']}...")
+        deliveries = read_deliveries(folder)
+        results = read_match_results(folder)
+        match_counts[comp["name"]] = int(deliveries["match_id"].nunique())
+        print(f"   {len(deliveries):,} deliveries across {match_counts[comp['name']]:,} matches")
+
+        raw_team_names.update(deliveries["batting_team"].dropna().unique())
+        raw_team_names.update(deliveries["bowling_team"].dropna().unique())
+        raw_venue_names.update(deliveries["venue"].dropna().unique())
+
+        deliveries = add_helper_columns(deliveries)
+        seen_team_ids.update(deliveries["bowling_team_id"].dropna().unique())
+        seen_team_ids.update(deliveries["batting_team_id"].dropna().unique())
+
+        print(f"   ⚡ batter vs bowler...")
+        matchups = aggregate_batter_vs_bowler(deliveries)
+        for row in matchups.itertuples(index=False):
+            matchup_totals[(row.striker, row.bowler)][code] = [
+                int(row.balls), int(row.runs), int(row.outs),
+                int(row.dots), int(row.fours), int(row.sixes),
+            ]
+
+        print(f"   🛡  batter vs team...")
+        team_records = aggregate_batter_vs_team(deliveries)
+        for row in team_records.itertuples(index=False):
+            if not row.bowling_team_id:
+                continue
+            team_totals[(row.striker, row.bowling_team_id)][code] = [
+                int(row.balls), int(row.runs), int(row.outs), int(row.dots),
+                int(row.fours), int(row.sixes), int(row.matches),
+            ]
+
+        print(f"   📋 innings breakdown...")
+        keep_pairs = matchups.loc[matchups["balls"] >= smallest_balls_for_innings_detail,
+                                  ["striker", "bowler"]]
+        innings = aggregate_innings(deliveries, keep_pairs)
+        for row in innings.itertuples(index=False):
+            bucket = innings_rows[(row.striker, row.bowler)].setdefault(code, [])
+            bucket.append([int(row.runs), int(row.balls), int(row.outs),
+                           row.date or "", str(row.venue),
+                           int(row.fours), int(row.sixes)])
+
+        print(f"   🏟  venues...")
+        venue_totals[code] = aggregate_venue_stats(deliveries, results)
+
+        print(f"   🎯 player totals...")
+        player_totals[code] = aggregate_player_totals(deliveries)
+
+        del deliveries, results, matchups, team_records, innings
+
+    # ─── Report any team spellings we may still be double-counting ────────────
+    canonical_names = sorted({canonical_team(n) for n in raw_team_names if canonical_team(n)})
+    leftover = find_near_duplicates([n for n in canonical_names if n not in IPL_TEAMS])
+    if leftover:
+        print("\n⚠️  merging near-duplicate team names:")
+        for drop, keep_name in leftover.items():
+            print(f"     {drop!r} -> {keep_name!r}")
+        merged = defaultdict(dict)
+        for (batter, team), by_code in team_totals.items():
+            target = leftover.get(team, team)
+            existing = merged[(batter, target)]
+            for code, numbers in by_code.items():
+                if code in existing:
+                    existing[code] = [a + b for a, b in zip(existing[code], numbers)]
+                else:
+                    existing[code] = list(numbers)
+        team_totals = merged
+        seen_team_ids = {leftover.get(t, t) for t in seen_team_ids}
+    else:
+        print("\n✅ no leftover duplicate team names")
+
+    # ─── Venue names ──────────────────────────────────────────────────────────
+    venue_name_map = build_venue_name_map(raw_venue_names)
+    print(f"   {len(raw_venue_names):,} venue spellings -> {len(set(venue_name_map.values())):,} grounds")
+
+    # ─── Teams file ───────────────────────────────────────────────────────────
     teams_out = {}
-    squads_out = {}
-    for code, meta in TEAMS.items():
-        teams_out[code] = {k: v for k, v in meta.items() if k != "squad_2026"}
-        squads_out[code] = meta["squad_2026"]
+    for team_id in sorted(seen_team_ids):
+        teams_out[team_id] = team_details(team_id)
+    for team_id in CURRENT_IPL_TEAMS:
+        teams_out.setdefault(team_id, team_details(team_id))
+    write_json("teams.json", teams_out)
+    print(f"   📁 teams.json ({len(teams_out)} teams)")
 
-    _write("teams.json", teams_out)
-    _write("squads.json", squads_out)
-    _write("schedule.json", SCHEDULE)
+    # ─── Batter-keyed files ───────────────────────────────────────────────────
+    print("\n📦 packing player files...")
+    batter_payloads = defaultdict(lambda: {"b": {}, "t": {}})
+    for (batter, bowler), by_code in matchup_totals.items():
+        batter_payloads[batter]["b"][bowler] = by_code
+    for (batter, team), by_code in team_totals.items():
+        batter_payloads[batter]["t"][team] = by_code
 
-    h2h = build_h2h(info_df)
-    _write("h2h.json", h2h)
+    bowler_payloads = defaultdict(lambda: {"b": {}})
+    for (batter, bowler), by_code in matchup_totals.items():
+        bowler_payloads[bowler]["b"][batter] = by_code
 
-    venues = build_venues(df.copy(), info_df)
-    _write("venues.json", venues)
+    write_sharded("bat", dict(batter_payloads))
+    write_sharded("bowl", dict(bowler_payloads))
 
-    bvb_list, bvb_innings = build_bvb(df.copy())
-    _write("bvb.json", bvb_list)
-    _write("bvb_innings.json", bvb_innings)
+    # ─── Innings files (keyed by batter so the matchup page loads one shard) ──
+    grouped_innings = defaultdict(dict)
+    for (batter, bowler), by_code in innings_rows.items():
+        grouped_innings[shard_for(batter)][(batter, bowler)] = by_code
 
-    bt = build_batter_team(df.copy())
-    _write("batter_team.json", bt)
+    innings_shards = {}
+    for shard_id, entries in grouped_innings.items():
+        venues_here = sorted({venue_name_map.get(row[4], row[4])
+                              for by_code in entries.values()
+                              for rows in by_code.values()
+                              for row in rows})
+        venue_index = {name: i for i, name in enumerate(venues_here)}
+        matchups_out = {}
+        for (batter, bowler), by_code in entries.items():
+            per_code = {}
+            for code, rows in by_code.items():
+                packed = [[r[0], r[1], r[2], r[3],
+                           venue_index[venue_name_map.get(r[4], r[4])], r[5], r[6]]
+                          for r in rows]
+                packed.sort(key=lambda r: r[3], reverse=True)
+                per_code[code] = packed
+            matchups_out[f"{batter}__{bowler}"] = per_code
+        innings_shards[shard_id] = {"v": venues_here, "m": matchups_out}
 
-    ms = build_milestones(df.copy())
-    _write("milestones.json", ms)
+    target = os.path.join(DATA_DIR, "inn")
+    if os.path.isdir(target):
+        shutil.rmtree(target)
+    total = 0
+    for shard_id in range(number_of_shards):
+        total += write_json(f"inn/{shard_id}.json", innings_shards.get(shard_id, {"v": [], "m": {}}))
+    print(f"   📁 inn/  ({number_of_shards} files, {total/1024/1024:.1f} MB)")
 
-    pts = build_points_table(df.copy(), info_df)
-    _write("points_table.json", pts)
+    # ─── Name lists / shard lookup ────────────────────────────────────────────
+    write_json("bat_index.json", {name: shard_for(name) for name in sorted(batter_payloads)})
+    write_json("bowl_index.json", {name: shard_for(name) for name in sorted(bowler_payloads)})
+    print(f"   📁 bat_index.json ({len(batter_payloads):,} batters)")
+    print(f"   📁 bowl_index.json ({len(bowler_payloads):,} bowlers)")
 
-    _write("meta.json", {"generated_at": datetime.now(timezone.utc).isoformat()})
+    # ─── Venues ───────────────────────────────────────────────────────────────
+    venues_out = defaultdict(dict)
+    for code, per_raw_venue in venue_totals.items():
+        merged_by_ground = defaultdict(lambda: {"matches": 0, "first_runs": 0, "first_count": 0,
+                                                "second_runs": 0, "second_count": 0,
+                                                "bat_first_wins": 0, "chase_wins": 0})
+        for raw, counters in per_raw_venue.items():
+            ground = venue_name_map.get(raw, raw)
+            target_counters = merged_by_ground[ground]
+            for field, value in counters.items():
+                target_counters[field] += value
 
-    print("✅ All data files written to data/")
+        for ground, c in merged_by_ground.items():
+            decided = c["bat_first_wins"] + c["chase_wins"]
+            venues_out[ground][code] = {
+                "matches": c["matches"],
+                "avg_first": round(c["first_runs"] / c["first_count"], 1) if c["first_count"] else 0,
+                "avg_second": round(c["second_runs"] / c["second_count"], 1) if c["second_count"] else 0,
+                "bat_first_wins": c["bat_first_wins"],
+                "chase_wins": c["chase_wins"],
+                "bat_first_pct": round(c["bat_first_wins"] / decided * 100, 1) if decided else 0,
+                "chase_pct": round(c["chase_wins"] / decided * 100, 1) if decided else 0,
+            }
+    write_json("venues.json", dict(venues_out))
+    print(f"   📁 venues.json ({len(venues_out):,} grounds)")
 
-def _write(name, obj):
-    path = os.path.join(DATA_DIR, name)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
-    size_kb = os.path.getsize(path) / 1024
-    print(f"   📁 {name} ({size_kb:.0f} KB)")
+    # ─── Milestones ───────────────────────────────────────────────────────────
+    write_json("milestones.json", build_milestones(player_totals, leftover))
+    print("   📁 milestones.json")
+
+    # ─── Meta ─────────────────────────────────────────────────────────────────
+    write_json("meta.json", {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "shards": number_of_shards,
+        "competitions": [{"code": c["code"], "name": c["name"]} for c in COMPETITIONS],
+        "match_counts": match_counts,
+        "batters": len(batter_payloads),
+        "bowlers": len(bowler_payloads),
+    })
+    print("   📁 meta.json")
+    print("\n✅ done — data/ is up to date")
+
+
+def build_milestones(player_totals, merged_team_names):
+    """Players sitting just short of a round-number career total, per competition."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days_before_a_player_goes_inactive)).strftime("%Y-%m-%d")
+
+    def badge_team(team_id):
+        return merged_team_names.get(team_id, team_id) or ""
+
+    out = {}
+    for code, (batting, bowling, batter_team, bowler_team) in player_totals.items():
+        runs_step, wickets_step = milestone_steps[code]
+        imminent, watchlist = [], []
+
+        for row in batting.itertuples(index=False):
+            if not row.last_played or row.last_played < cutoff:
+                continue
+            total = int(row.runs)
+            if total < runs_step * 0.8:
+                continue
+            target = ((total // runs_step) + 1) * runs_step
+            needed = target - total
+            if needed > milestone_watchlist_runs:
+                continue
+            entry = {"player": row.striker,
+                     "team": badge_team(batter_team.get(row.striker)),
+                     "milestone": f"{target:,} runs", "icon": "🏏",
+                     "detail": f"On {total:,} runs — {needed} away from {target:,}",
+                     "needed": f"{needed} runs", "sort": needed}
+            (imminent if needed <= milestone_imminent_runs else watchlist).append(entry)
+
+        for row in bowling.itertuples(index=False):
+            if not row.last_played or row.last_played < cutoff:
+                continue
+            total = int(row.wickets)
+            if total < wickets_step * 0.8:
+                continue
+            target = ((total // wickets_step) + 1) * wickets_step
+            needed = target - total
+            if needed > milestone_watchlist_wickets:
+                continue
+            entry = {"player": row.bowler,
+                     "team": badge_team(bowler_team.get(row.bowler)),
+                     "milestone": f"{target} wickets", "icon": "🪵",
+                     "detail": f"On {total} wickets — {needed} away from {target}",
+                     "needed": f"{needed} wickets", "sort": needed}
+            (imminent if needed <= milestone_imminent_wickets else watchlist).append(entry)
+
+        imminent.sort(key=lambda e: e["sort"])
+        watchlist.sort(key=lambda e: e["sort"])
+        for entry in imminent + watchlist:
+            entry.pop("sort")
+        for entry in watchlist:
+            entry["icon"] = "👀"
+        out[code] = {"imminent": imminent[:25], "watchlist": watchlist[:25]}
+    return out
+
 
 if __name__ == "__main__":
     main()

@@ -1,118 +1,154 @@
+/* Player Matchup — one batter against one bowler, across every competition. */
+
 import * as store from "../store.js";
-import { hud, fmtDate, innRow, collapse } from "../ui.js";
+import { DEFAULT_FILTER, filterById, combine, toStats } from "../formats.js";
+import {
+  pageHeader, searchBox, wireSearchBox, competitionChips, onChipPick,
+  hud, innRow, emptyState, escapeHtml, collapse,
+} from "../ui.js";
 
-export async function render(el) {
-  const [bvbData, bvbInn] = await Promise.all([store.bvb(), store.bvbInnings()]);
+const COMPETITION_NAMES = { p: "IPL", t: "Test", o: "ODI", i: "T20I" };
 
-  const batters = [...new Set(bvbData.filter(m => m.balls >= 6).map(m => m.batter))].sort();
-  const bowlers = [...new Set(bvbData.filter(m => m.balls >= 6).map(m => m.bowler))].sort();
+export async function render(el, params) {
+  const [batterIndex, bowlerIndex] = await Promise.all([store.batterIndex(), store.bowlerIndex()]);
+  const batterNames = Object.keys(batterIndex);
+  const bowlerNames = Object.keys(bowlerIndex);
 
-  let html = `<div class="page-header">
-    <h1>⚔️ <span class="accent">Player Matchup</span></h1>
-    <p>Search any batter vs bowler combination in IPL history</p>
-  </div>
-  <div class="grid-2" style="margin-bottom:1.5rem;">
-    <div class="search-wrap">
-      <span class="search-icon">🏏</span>
-      <input class="search-input" id="batSearch" placeholder="Search batter..." autocomplete="off">
-      <div class="dropdown" id="batDrop"></div>
+  let batter = "", bowler = "";
+  if (params) {
+    const [a, b] = decodeURIComponent(params).split("__");
+    if (a && batterIndex[a] !== undefined) batter = a;
+    if (b && bowlerIndex[b] !== undefined) bowler = b;
+  }
+  let competition = DEFAULT_FILTER;
+  let record = null, innings = {};
+
+  el.innerHTML = `
+    ${pageHeader("⚔️", "Player Matchup", "Any batter against any bowler — IPL, Test, ODI and T20I")}
+    <div class="grid-2" style="margin-bottom:1rem;">
+      ${searchBox("muBatter", "Search batter…", "🏏")}
+      ${searchBox("muBowler", "Search bowler…", "⚾")}
     </div>
-    <div class="search-wrap">
-      <span class="search-icon">⚾</span>
-      <input class="search-input" id="bowlSearch" placeholder="Search bowler..." autocomplete="off">
-      <div class="dropdown" id="bowlDrop"></div>
-    </div>
-  </div>
-  <div id="muResult"></div>`;
+    ${competitionChips(competition)}
+    <div id="muResult"></div>`;
 
-  el.innerHTML = html;
+  const output = document.getElementById("muResult");
 
-  let selectedBat = "", selectedBowl = "";
+  wireSearchBox("muBatter", batterNames, name => { batter = name; reload(); });
+  wireSearchBox("muBowler", bowlerNames, name => { bowler = name; reload(); });
+  onChipPick(el, "competition", value => { competition = value; paint(); });
 
-  setupSearch("batSearch", "batDrop", batters, v => { selectedBat = v; showMatchup(); });
-  setupSearch("bowlSearch", "bowlDrop", bowlers, v => { selectedBowl = v; showMatchup(); });
+  async function reload() {
+    if (!batter || !bowler) { paint(); return; }
+    window.history.replaceState(null, "", `#matchup/${encodeURIComponent(`${batter}__${bowler}`)}`);
+    output.innerHTML = `<div class="loader"><div class="loader__spinner"></div><p>Loading matchup…</p></div>`;
+    try {
+      const [batterRecord, matchupInnings] = await Promise.all([
+        store.batterRecord(batter),
+        store.matchupInnings(batter, bowler),
+      ]);
+      record = batterRecord?.b?.[bowler] || null;
+      innings = matchupInnings;
+    } catch {
+      output.innerHTML = emptyState("⚠️", "Could not load this matchup.");
+      return;
+    }
+    paint();
+  }
 
-  function showMatchup() {
-    const out = document.getElementById("muResult");
-    if (!selectedBat || !selectedBowl) {
-      out.innerHTML = selectedBat || selectedBowl
-        ? `<div class="empty"><div class="empty__text">Select both a batter and a bowler</div></div>` : "";
+  function paint() {
+    if (!batter || !bowler) {
+      output.innerHTML = batter || bowler
+        ? emptyState("⚔️", "Pick both a batter and a bowler")
+        : emptyState("⚔️", "Search for a batter and a bowler to see their head-to-head");
       return;
     }
 
-    const m = bvbData.find(r => r.batter === selectedBat && r.bowler === selectedBowl);
-    if (!m) {
-      out.innerHTML = `<div class="empty"><div class="empty__icon">🚫</div>
-        <div class="empty__text">No IPL data for <strong>${selectedBat}</strong> vs <strong>${selectedBowl}</strong></div></div>`;
+    const filter = filterById(competition);
+    const stats = toStats(combine(record, filter.codes));
+
+    if (!stats) {
+      output.innerHTML = `${breakdownBar(record)}
+        ${emptyState("🚫", `<strong>${escapeHtml(batter)}</strong> has not faced
+          <strong>${escapeHtml(bowler)}</strong> in <strong>${filter.label}</strong>`)}`;
       return;
     }
 
-    const key = `${selectedBat}__${selectedBowl}`;
-    const innings = bvbInn[key] || [];
-
-    let h = `<div class="card card--flat animate-in" style="margin-bottom:1rem; text-align:center; padding:1.5rem;">
-      <div style="font-size:1.3rem; font-weight:800;">
-        🏏 <span style="color:var(--gold);">${m.batter}</span>
+    let html = `<div class="card card--flat animate-in" style="margin-bottom:1rem; text-align:center; padding:1.4rem;">
+      <div style="font-size:1.25rem; font-weight:800;">
+        🏏 <span style="color:var(--gold);">${escapeHtml(batter)}</span>
         <span style="color:var(--text-dim);"> vs </span>
-        ⚾ <span>${m.bowler}</span>
+        ⚾ <span>${escapeHtml(bowler)}</span>
       </div>
-      <div style="color:var(--text-muted); font-size:0.82rem; margin-top:0.3rem;">All-Time IPL</div>
+      <div style="color:var(--text-muted); font-size:0.82rem; margin-top:0.3rem;">${filter.label}</div>
     </div>`;
 
-    h += `<div class="hud-grid hud-grid--6 animate-in stagger-1">
-      ${hud(m.balls, "Balls", "var(--text-muted)", "148,163,184")}
-      ${hud(m.runs, "Runs", "var(--green)", "16,185,129")}
-      ${hud(m.dismissals, "Dismissed", "var(--red)", "239,68,68")}
-      ${hud(m.sr, "Strike Rate", "var(--blue)", "59,130,246")}
-      ${hud(m.avg || "N/A", "Average", "var(--orange)", "245,158,11")}
-      ${hud(m.dots, "Dot Balls", "var(--text-dim)", "71,85,105")}
+    html += breakdownBar(record);
+
+    html += `<div class="hud-grid hud-grid--6 animate-in stagger-1">
+      ${hud(stats.balls, "Balls", "var(--text-muted)", "148,163,184")}
+      ${hud(stats.runs, "Runs", "var(--green)", "16,185,129")}
+      ${hud(stats.outs, "Dismissed", "var(--red)", "239,68,68")}
+      ${hud(stats.strikeRate, "Strike Rate", "var(--blue)", "59,130,246")}
+      ${hud(stats.average ?? "—", "Average", "var(--orange)", "245,158,11")}
+      ${hud(stats.dots, "Dot Balls", "var(--text-dim)", "71,85,105")}
     </div>`;
 
-    h += `<div class="hud-grid hud-grid--3 animate-in stagger-2" style="margin-top:0.75rem;">
-      ${hud(m.fours, "Fours", "var(--green)", "16,185,129")}
-      ${hud(m.sixes, "Sixes", "var(--purple)", "168,85,247")}
-      ${hud(m.balls ? (m.dots / m.balls * 100).toFixed(1) + "%" : "0%", "Dot Ball %", "var(--text-dim)", "71,85,105")}
+    html += `<div class="hud-grid hud-grid--4 animate-in stagger-2" style="margin-top:0.75rem;">
+      ${hud(stats.fours, "Fours", "var(--green)", "16,185,129")}
+      ${hud(stats.sixes, "Sixes", "var(--purple)", "168,85,247")}
+      ${hud(stats.boundaries, "Boundaries", "var(--gold)", "255,215,0")}
+      ${hud(stats.dotPct + "%", "Dot Ball %", "var(--text-dim)", "71,85,105")}
     </div>`;
 
-    if (innings.length) {
-      h += `<div class="section-title animate-in stagger-3" style="margin-top:1.5rem;">
-        📋 Innings Breakdown (${innings.length} encounters)
-      </div>`;
-      h += innings.map(inn => innRow(inn, true)).join("");
+    const encounters = filter.codes
+      .flatMap(code => (innings[code] || []).map(inn => ({ ...inn, competition: COMPETITION_NAMES[code] })))
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+
+    if (encounters.length) {
+      const rows = encounters.map(inn =>
+        innRow(inn).replace('class="inn-row__score">',
+          `class="inn-row__score"><span class="comp-tag">${inn.competition}</span> `)
+      );
+      html += `<div class="section-title animate-in stagger-3" style="margin-top:1.5rem;">
+        📋 Innings Breakdown (${encounters.length} encounters)</div>`;
+      html += rows.slice(0, 8).join("");
+      if (rows.length > 8) {
+        html += collapse(`📋 View all ${rows.length} encounters`, rows.slice(8).join(""));
+      }
     }
 
-    // Verdict
-    if (m.dismissals >= 3 && m.sr < 120)
-      h += `<div class="card animate-in" style="margin-top:1rem; border-left:3px solid var(--red); padding:0.8rem 1rem;"><strong>Verdict:</strong> ⚾ <strong>${m.bowler}</strong> dominates — ${m.dismissals} dismissals at SR ${m.sr}</div>`;
-    else if (m.dismissals === 0 && m.sr > 140 && m.balls >= 12)
-      h += `<div class="card animate-in" style="margin-top:1rem; border-left:3px solid var(--green); padding:0.8rem 1rem;"><strong>Verdict:</strong> 🏏 <strong>${m.batter}</strong> dominates — ${m.runs} runs at SR ${m.sr}, never dismissed</div>`;
+    html += verdict(stats, batter, bowler);
+    output.innerHTML = html;
+  }
 
-    out.innerHTML = h;
+  /* A small strip showing how the matchup splits across competitions, so it is
+     obvious which filters have anything in them. */
+  function breakdownBar(perCompetition) {
+    if (!perCompetition) return "";
+    const parts = Object.entries(COMPETITION_NAMES)
+      .filter(([code]) => perCompetition[code])
+      .map(([code, name]) => {
+        const s = toStats(perCompetition[code]);
+        return `<span class="split-pill"><strong>${name}</strong> ${s.runs}(${s.balls})
+          · ${s.outs} out</span>`;
+      });
+    if (!parts.length) return "";
+    return `<div class="split-row animate-in">${parts.join("")}</div>`;
   }
 }
 
-function setupSearch(inputId, dropId, items, onSelect) {
-  const input = document.getElementById(inputId);
-  const drop = document.getElementById(dropId);
-  let filtered = [];
-
-  input.addEventListener("input", () => {
-    const q = input.value.toLowerCase().trim();
-    if (q.length < 1) { drop.classList.remove("open"); return; }
-    filtered = items.filter(n => n.toLowerCase().includes(q)).slice(0, 20);
-    drop.innerHTML = filtered.map(n =>
-      `<div class="dropdown__item">${n}</div>`
-    ).join("");
-    drop.classList.toggle("open", filtered.length > 0);
-  });
-
-  drop.addEventListener("click", e => {
-    if (e.target.classList.contains("dropdown__item")) {
-      input.value = e.target.textContent;
-      drop.classList.remove("open");
-      onSelect(e.target.textContent);
-    }
-  });
-
-  input.addEventListener("blur", () => setTimeout(() => drop.classList.remove("open"), 200));
+function verdict(stats, batter, bowler) {
+  if (stats.balls < 12) return "";
+  if (stats.outs >= 3 && stats.strikeRate < 110) {
+    return `<div class="card animate-in verdict verdict--bowler">
+      <strong>Verdict:</strong> ⚾ <strong>${escapeHtml(bowler)}</strong> holds the edge —
+      ${stats.outs} dismissals at a strike rate of ${stats.strikeRate}</div>`;
+  }
+  if (stats.outs === 0 && stats.strikeRate > 140) {
+    return `<div class="card animate-in verdict verdict--batter">
+      <strong>Verdict:</strong> 🏏 <strong>${escapeHtml(batter)}</strong> holds the edge —
+      ${stats.runs} runs at a strike rate of ${stats.strikeRate}, never dismissed</div>`;
+  }
+  return "";
 }

@@ -1,93 +1,120 @@
+/* Bowler Strengths — the batters a bowler gets out most, per competition. */
+
 import * as store from "../store.js";
-import { hud } from "../ui.js";
+import { DEFAULT_FILTER, filterById, statsByOpponent } from "../formats.js";
+import {
+  pageHeader, searchBox, wireSearchBox, competitionChips, chipRow, onChipPick,
+  rankTable, emptyState, escapeHtml,
+} from "../ui.js";
 
-let showCount = 10;
+const ROWS_TO_SHOW = 10;
 
-export async function render(el) {
-  const bvbData = await store.bvb();
-  const bowlers = [...new Set(bvbData.filter(m => m.balls >= 6).map(m => m.bowler))].sort();
+const SORTS = [
+  { id: "outs",  label: "Dismissals", compare: (a, b) => b.outs - a.outs || b.balls - a.balls },
+  { id: "dots",  label: "Dot balls",  compare: (a, b) => b.dots - a.dots || b.balls - a.balls },
+  { id: "balls", label: "Balls bowled", compare: (a, b) => b.balls - a.balls },
+  { id: "econ",  label: "Strike rate conceded (lowest)",
+    compare: (a, b) => a.strikeRate - b.strikeRate || b.balls - a.balls,
+    needs: r => r.balls >= 18, note: "min 18 balls" },
+];
 
-  let html = `<div class="page-header">
-    <h1>⚾ <span class="accent">Bowler Strengths</span></h1>
-    <p>Select a bowler to see every batter they've dismissed 2+ times in IPL history</p>
-  </div>
-  <div class="search-wrap" style="max-width:500px;">
-    <span class="search-icon">⚾</span>
-    <input class="search-input" id="bowlPick" placeholder="Search bowler..." autocomplete="off">
-    <div class="dropdown" id="bowlPickDrop"></div>
-  </div>
-  <div id="bowlResult"></div>`;
+export async function render(el, params) {
+  const index = await store.bowlerIndex();
+  const bowlerNames = Object.keys(index);
 
-  el.innerHTML = html;
+  let bowler = params ? decodeURIComponent(params) : "";
+  let competition = DEFAULT_FILTER;
+  let sortId = SORTS[0].id;
+  let showAll = false;
+  let record = null;
 
-  const input = document.getElementById("bowlPick");
-  const drop = document.getElementById("bowlPickDrop");
+  el.innerHTML = `
+    ${pageHeader("⚾", "Bowler Strengths", "Pick a bowler to rank the batters they dominate")}
+    <div class="picker-row">${searchBox("bowlPick", "Search a bowler…", "⚾")}</div>
+    ${competitionChips(competition)}
+    ${chipRow("sort", SORTS, sortId, "Sort by")}
+    <div id="bowlResult"></div>`;
 
-  input.addEventListener("input", () => {
-    const q = input.value.toLowerCase().trim();
-    if (q.length < 1) { drop.classList.remove("open"); return; }
-    const filtered = bowlers.filter(n => n.toLowerCase().includes(q)).slice(0, 20);
-    drop.innerHTML = filtered.map(n => `<div class="dropdown__item">${n}</div>`).join("");
-    drop.classList.toggle("open", filtered.length > 0);
+  const output = document.getElementById("bowlResult");
+
+  wireSearchBox("bowlPick", bowlerNames, name => {
+    bowler = name;
+    window.history.replaceState(null, "", `#bowler/${encodeURIComponent(name)}`);
+    loadBowler();
   });
 
-  drop.addEventListener("click", e => {
-    if (e.target.classList.contains("dropdown__item")) {
-      input.value = e.target.textContent;
-      drop.classList.remove("open");
-      showCount = 10;
-      showBowler(e.target.textContent, bvbData);
+  onChipPick(el, "competition", value => { competition = value; showAll = false; paint(); });
+  onChipPick(el, "sort", value => { sortId = value; showAll = false; paint(); });
+
+  async function loadBowler() {
+    output.innerHTML = `<div class="loader"><div class="loader__spinner"></div><p>Loading ${escapeHtml(bowler)}…</p></div>`;
+    try {
+      record = await store.bowlerRecord(bowler);
+    } catch {
+      output.innerHTML = emptyState("⚠️", "Could not load this bowler's data.");
+      return;
     }
-  });
-
-  input.addEventListener("blur", () => setTimeout(() => drop.classList.remove("open"), 200));
-}
-
-function showBowler(bowlerName, bvbData) {
-  const out = document.getElementById("bowlResult");
-  let strengths = bvbData
-    .filter(m => m.bowler === bowlerName && m.dismissals >= 2)
-    .sort((a, b) => b.dismissals - a.dismissals || b.balls - a.balls);
-
-  if (!strengths.length) {
-    out.innerHTML = `<div class="empty" style="margin-top:1rem;"><div class="empty__icon">🚫</div>
-      <div class="empty__text">No batters dismissed 2+ times by <strong>${bowlerName}</strong></div></div>`;
-    return;
+    showAll = false;
+    paint();
   }
 
-  const display = strengths.slice(0, showCount);
+  function paint() {
+    if (!bowler) {
+      output.innerHTML = emptyState("⚾", "Search for a bowler above to see who they dominate");
+      return;
+    }
+    const filter = filterById(competition);
+    const sort = SORTS.find(s => s.id === sortId) || SORTS[0];
+    let rows = statsByOpponent(record?.b, filter.codes).filter(r => r.outs > 0);
+    if (sort.needs) rows = rows.filter(sort.needs);
+    rows.sort(sort.compare);
 
-  let h = `<p style="color:var(--text-muted); font-size:0.9rem; margin:1rem 0;">
-    <strong style="color:var(--gold);">${bowlerName}</strong> has dismissed
-    <strong>${strengths.length}</strong> batters 2+ times in IPL
-  </p>`;
+    if (!rows.length) {
+      output.innerHTML = emptyState("🚫",
+        `<strong>${escapeHtml(bowler)}</strong> has no dismissals in <strong>${filter.label}</strong>`);
+      return;
+    }
 
-  h += display.map((m, i) => `<div class="mu-card animate-in" style="animation-delay:${i * 0.04}s;">
-    <div class="mu-card__header">
-      <span class="mu-card__rank">#${i + 1}</span>
-      <span class="mu-card__name" style="color:var(--gold);">🏏 ${m.batter}</span>
-      <span class="mu-card__dismiss">${m.dismissals} dismissals</span>
-    </div>
-    <div class="hud-grid hud-grid--5">
-      ${hud(m.balls, "Balls", "var(--text-muted)", "148,163,184")}
-      ${hud(m.runs, "Runs", "var(--green)", "16,185,129")}
-      ${hud(m.dismissals, "Dismissed", "var(--red)", "239,68,68")}
-      ${hud(m.sr, "Strike Rate", "var(--blue)", "59,130,246")}
-      ${hud(m.dots, "Dot Balls", "var(--text-dim)", "71,85,105")}
-    </div>
-  </div>`).join("");
+    const shown = showAll ? rows : rows.slice(0, ROWS_TO_SHOW);
+    const columns = [
+      { label: "#", align: "left", cell: (_r, i) => `<span class="rank-num">${i + 1}</span>` },
+      { label: "Batter", align: "left", cell: r => `<span class="opp-cell">🏏 ${escapeHtml(r.opponent)}</span>` },
+      { label: "Out", cell: r => `<strong style="color:var(--red);">${r.outs}</strong>` },
+      { label: "Balls", cell: r => r.balls },
+      { label: "Runs", cell: r => r.runs },
+      { label: "SR", cell: r => r.strikeRate },
+      { label: "Avg", cell: r => r.average ?? `<span class="dim">—</span>` },
+      { label: "Balls/Out", cell: r => r.ballsPerOut ?? `<span class="dim">—</span>` },
+      { label: "Dots", cell: r => r.dots },
+      { label: "Dot %", cell: r => `${r.dotPct}%` },
+    ];
 
-  if (showCount < strengths.length) {
-    const remaining = strengths.length - showCount;
-    h += `<div style="text-align:center; margin-top:1rem;">
-      <button class="btn btn--outline" id="loadMoreBowl">Load More (${remaining} remaining)</button>
+    let html = `<div class="rank-summary animate-in">
+      <span class="rank-summary__name">⚾ ${escapeHtml(bowler)}</span>
+      <span class="rank-summary__meta">${filter.label} · sorted by ${escapeHtml(sort.label)}
+        · showing ${shown.length} of ${rows.length}${sort.note ? ` · ${escapeHtml(sort.note)}` : ""}</span>
     </div>`;
+    html += rankTable(columns, shown);
+
+    if (rows.length > ROWS_TO_SHOW) {
+      html += `<div style="text-align:center; margin-top:1rem;">
+        <button class="btn btn--outline" id="bowlToggle">
+          ${showAll ? `Show top ${ROWS_TO_SHOW} only` : `Show all ${rows.length}`}
+        </button></div>`;
+    }
+
+    output.innerHTML = html;
+    document.getElementById("bowlToggle")?.addEventListener("click", () => {
+      showAll = !showAll;
+      paint();
+    });
   }
 
-  out.innerHTML = h;
-
-  document.getElementById("loadMoreBowl")?.addEventListener("click", () => {
-    showCount += 10;
-    showBowler(bowlerName, bvbData);
-  });
+  if (bowler && index[bowler] !== undefined) {
+    document.getElementById("bowlPick").value = bowler;
+    await loadBowler();
+  } else {
+    bowler = "";
+    paint();
+  }
 }
