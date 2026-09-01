@@ -196,8 +196,8 @@ def read_deliveries(folder):
     # One file per match, named after the match id. Some archives also ship an
     # all_matches.csv holding the same deliveries again, so only take the
     # numbered files or every ball would be counted twice.
-    paths = [p for p in glob.glob(os.path.join(folder, "*.csv"))
-             if os.path.basename(p)[:-4].isdigit()]
+    paths = sorted(p for p in glob.glob(os.path.join(folder, "*.csv"))
+                   if os.path.basename(p)[:-4].isdigit())
     frames = []
     for path in paths:
         try:
@@ -430,7 +430,7 @@ def write_json(relative_path, payload):
     path = os.path.join(DATA_DIR, relative_path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return os.path.getsize(path)
 
 
@@ -590,7 +590,7 @@ def main():
                 packed = [[r[0], r[1], r[2], r[3],
                            venue_index[venue_name_map.get(r[4], r[4])], r[5], r[6]]
                           for r in rows]
-                packed.sort(key=lambda r: r[3], reverse=True)
+                packed.sort(key=lambda r: (r[3], r[0], r[1], r[4]), reverse=True)
                 per_code[code] = packed
             matchups_out[f"{batter}__{bowler}"] = per_code
         innings_shards[shard_id] = {"v": venues_here, "m": matchups_out}
