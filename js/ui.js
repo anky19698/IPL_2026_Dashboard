@@ -78,6 +78,68 @@ export function onChipPick(root, groupName, onPick) {
   });
 }
 
+/* ─── Season picker ───────────────────────────────────────────────────────── */
+
+/* A "from" and a "to" year, plus a button to go back to the whole career.
+   Setting both ends to the same year is how you look at one season. */
+export function seasonPicker(years, from, to) {
+  if (!years.length) {
+    return `<div class="filter-row">
+      <span class="filter-row__label">Season</span>
+      <span class="season-empty">—</span>
+    </div>`;
+  }
+
+  const options = chosen => years.map(year =>
+    `<option value="${year}"${year === chosen ? " selected" : ""}>${year}</option>`
+  ).join("");
+
+  const wholeCareer = from === years[0] && to === years[years.length - 1];
+
+  return `<div class="filter-row">
+    <span class="filter-row__label">Season</span>
+    <div class="season-picker">
+      <button class="chip${wholeCareer ? " chip--on" : ""}" data-season-all="1">All years</button>
+      <select class="season-select" data-season-edge="from" aria-label="From year">${options(from)}</select>
+      <span class="season-picker__dash">to</span>
+      <select class="season-select" data-season-edge="to" aria-label="To year">${options(to)}</select>
+    </div>
+  </div>`;
+}
+
+/* Wire a season picker up. onPick gets {from, to}; the ends are kept in order,
+   so dragging "from" past "to" pushes "to" along rather than going blank. */
+export function wireSeasonPicker(root, years, current, onPick) {
+  const picker = root.querySelector(".season-picker");
+  if (!picker) return;
+
+  picker.querySelector("[data-season-all]")?.addEventListener("click", () => {
+    onPick({ from: years[0], to: years[years.length - 1] });
+  });
+
+  picker.querySelectorAll(".season-select").forEach(select => {
+    select.addEventListener("change", () => {
+      const value = Number(select.value);
+      let { from, to } = current;
+      if (select.dataset.seasonEdge === "from") {
+        from = value;
+        if (from > to) to = from;
+      } else {
+        to = value;
+        if (to < from) from = to;
+      }
+      onPick({ from, to });
+    });
+  });
+}
+
+/* How the chosen span reads in the summary line. */
+export function describeSeason(years, season) {
+  if (!years.length || !season) return "all years";
+  if (season.from === years[0] && season.to === years[years.length - 1]) return "all years";
+  return season.from === season.to ? `${season.from}` : `${season.from}–${season.to}`;
+}
+
 /* ─── Player search box ───────────────────────────────────────────────────── */
 
 export function searchBox(id, placeholder, icon = "🏏") {

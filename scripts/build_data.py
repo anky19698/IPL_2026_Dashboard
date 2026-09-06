@@ -66,6 +66,19 @@ seconds_between_download_attempts = 15
 # Handy while developing; the GitHub Action always downloads fresh.
 reuse_downloaded_files = False
 
+# Batter records are split by year so the site can filter by season. One row
+# per year, laid out in this order (batter-vs-team rows add matches on the end):
+#   [year, balls, runs, dismissals, dots, fours, sixes, runs won, runs lost]
+# "runs won" and "runs lost" are runs made in matches the batter's own team went
+# on to win or lose. Drawn and abandoned matches count in neither, so those two
+# do not always add up to the total.
+YEAR_ROW_FIELDS = ["year", "balls", "runs", "outs", "dots", "fours", "sixes",
+                   "runs_won", "runs_lost"]
+
+# The ball thresholds below are checked against a pairing's whole career in a
+# competition, not against a single year — otherwise the year rows would not
+# add up to the career total.
+
 # A batter-vs-bowler pairing needs at least this many balls before we keep it.
 # Anything smaller is noise and just bloats the data files.
 smallest_balls_for_a_matchup = 3
@@ -237,7 +250,7 @@ def read_match_results(folder):
 # Adding the helper columns we aggregate on
 # ══════════════════════════════════════════════════════════════════════════════
 
-def add_helper_columns(deliveries):
+def add_helper_columns(deliveries, match_results):
     runs = deliveries["runs_off_bat"].fillna(0)
     deliveries["runs_off_bat"] = runs
 
@@ -256,6 +269,18 @@ def add_helper_columns(deliveries):
     deliveries["bowling_team_id"] = deliveries["bowling_team"].map(team_ids)
     deliveries["batting_team_id"] = deliveries["batting_team"].map(team_ids)
     deliveries["match_date"] = deliveries["start_date"].dt.strftime("%Y-%m-%d")
+    deliveries["year"] = deliveries["start_date"].dt.year.fillna(0).astype("int32")
+
+    # Split each batter's runs by what happened to their own team in that match.
+    # A drawn Test or an abandoned game has no winner, so it lands in neither.
+    winner_by_match = {mid: canonical_team(record.get("winner"))
+                       for mid, record in match_results.items()
+                       if record.get("winner")}
+    winner_id = deliveries["match_id"].map(winner_by_match)
+    batted_for_winner = winner_id.notna() & (winner_id == deliveries["batting_team_id"])
+    batted_for_loser = winner_id.notna() & (winner_id != deliveries["batting_team_id"])
+    deliveries["runs_won"] = runs.where(batted_for_winner, 0)
+    deliveries["runs_lost"] = runs.where(batted_for_loser, 0)
     return deliveries
 
 
@@ -263,31 +288,44 @@ def add_helper_columns(deliveries):
 # Aggregating
 # ══════════════════════════════════════════════════════════════════════════════
 
+YEAR_TOTALS = dict(
+    balls=("legal", "sum"),
+    runs=("runs_off_bat", "sum"),
+    outs=("bowler_wicket", "sum"),
+    dots=("dot", "sum"),
+    fours=("four", "sum"),
+    sixes=("six", "sum"),
+    runs_won=("runs_won", "sum"),
+    runs_lost=("runs_lost", "sum"),
+)
+
+
 def aggregate_batter_vs_bowler(deliveries):
-    grouped = deliveries.groupby(["striker", "bowler"], sort=False).agg(
-        balls=("legal", "sum"),
-        runs=("runs_off_bat", "sum"),
-        outs=("bowler_wicket", "sum"),
-        dots=("dot", "sum"),
-        fours=("four", "sum"),
-        sixes=("six", "sum"),
-    ).reset_index()
-    grouped = grouped[grouped["balls"] >= smallest_balls_for_a_matchup]
-    return grouped
+    """
+    Per-year rows for every batter-vs-bowler pairing worth keeping, plus the
+    career totals we use to decide what is worth keeping in the first place.
+    """
+    careers = deliveries.groupby(["striker", "bowler"], sort=False).agg(
+        balls=("legal", "sum")).reset_index()
+    careers = careers[careers["balls"] >= smallest_balls_for_a_matchup]
+
+    per_year = deliveries.groupby(["striker", "bowler", "year"], sort=False).agg(
+        **YEAR_TOTALS).reset_index()
+    per_year = per_year.merge(careers[["striker", "bowler"]],
+                              on=["striker", "bowler"], how="inner")
+    return per_year, careers
 
 
 def aggregate_batter_vs_team(deliveries):
-    grouped = deliveries.groupby(["striker", "bowling_team_id"], sort=False).agg(
-        balls=("legal", "sum"),
-        runs=("runs_off_bat", "sum"),
-        outs=("bowler_wicket", "sum"),
-        dots=("dot", "sum"),
-        fours=("four", "sum"),
-        sixes=("six", "sum"),
-        matches=("match_id", "nunique"),
-    ).reset_index()
-    grouped = grouped[grouped["balls"] >= smallest_balls_for_a_team_record]
-    return grouped
+    careers = deliveries.groupby(["striker", "bowling_team_id"], sort=False).agg(
+        balls=("legal", "sum")).reset_index()
+    careers = careers[careers["balls"] >= smallest_balls_for_a_team_record]
+
+    per_year = deliveries.groupby(["striker", "bowling_team_id", "year"], sort=False).agg(
+        matches=("match_id", "nunique"), **YEAR_TOTALS).reset_index()
+    per_year = per_year.merge(careers[["striker", "bowling_team_id"]],
+                              on=["striker", "bowling_team_id"], how="inner")
+    return per_year
 
 
 def aggregate_innings(deliveries, keep_pairs):
@@ -420,6 +458,34 @@ def build_venue_name_map(raw_names):
 # Writing the output files
 # ══════════════════════════════════════════════════════════════════════════════
 
+def add_year_rows(left, right):
+    """Combine two lists of year rows, adding up any year they share."""
+    by_year = {}
+    for row in list(left) + list(right):
+        year = row[0]
+        if year in by_year:
+            running = by_year[year]
+            for i in range(1, len(row)):
+                running[i] += row[i]
+        else:
+            by_year[year] = list(row)
+    return [by_year[year] for year in sorted(by_year)]
+
+
+def career_total(year_rows):
+    """Add a pairing's year rows into one career total, dropping the year and
+    the win/loss split the bowler page does not use."""
+    balls = runs = outs = dots = fours = sixes = 0
+    for _year, row_balls, row_runs, row_outs, row_dots, row_fours, row_sixes, *_ in year_rows:
+        balls += row_balls
+        runs += row_runs
+        outs += row_outs
+        dots += row_dots
+        fours += row_fours
+        sixes += row_sixes
+    return [balls, runs, outs, dots, fours, sixes]
+
+
 def shard_for(name):
     """Which file a player's data lives in. Stable, so unchanged players keep
     the same file and the daily commit stays small."""
@@ -458,8 +524,8 @@ def write_sharded(folder, contents_by_name):
 def main():
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    matchup_totals = defaultdict(dict)      # (batter, bowler) -> {code: [6 numbers]}
-    team_totals = defaultdict(dict)         # (batter, team)   -> {code: [7 numbers]}
+    matchup_years = defaultdict(dict)       # (batter, bowler) -> {code: [year rows]}
+    team_years = defaultdict(dict)          # (batter, team)   -> {code: [year rows]}
     innings_rows = defaultdict(dict)        # (batter, bowler) -> {code: [rows]}
     venue_totals = {}                       # code -> {raw venue: counters}
     player_totals = {}                      # code -> (batting, bowling, teams)
@@ -482,31 +548,34 @@ def main():
         raw_team_names.update(deliveries["bowling_team"].dropna().unique())
         raw_venue_names.update(deliveries["venue"].dropna().unique())
 
-        deliveries = add_helper_columns(deliveries)
+        deliveries = add_helper_columns(deliveries, results)
         seen_team_ids.update(deliveries["bowling_team_id"].dropna().unique())
         seen_team_ids.update(deliveries["batting_team_id"].dropna().unique())
 
         print(f"   ⚡ batter vs bowler...")
-        matchups = aggregate_batter_vs_bowler(deliveries)
+        matchups, matchup_careers = aggregate_batter_vs_bowler(deliveries)
         for row in matchups.itertuples(index=False):
-            matchup_totals[(row.striker, row.bowler)][code] = [
-                int(row.balls), int(row.runs), int(row.outs),
+            matchup_years[(row.striker, row.bowler)].setdefault(code, []).append([
+                int(row.year), int(row.balls), int(row.runs), int(row.outs),
                 int(row.dots), int(row.fours), int(row.sixes),
-            ]
+                int(row.runs_won), int(row.runs_lost),
+            ])
 
         print(f"   🛡  batter vs team...")
         team_records = aggregate_batter_vs_team(deliveries)
         for row in team_records.itertuples(index=False):
             if not row.bowling_team_id:
                 continue
-            team_totals[(row.striker, row.bowling_team_id)][code] = [
-                int(row.balls), int(row.runs), int(row.outs), int(row.dots),
-                int(row.fours), int(row.sixes), int(row.matches),
-            ]
+            team_years[(row.striker, row.bowling_team_id)].setdefault(code, []).append([
+                int(row.year), int(row.balls), int(row.runs), int(row.outs),
+                int(row.dots), int(row.fours), int(row.sixes),
+                int(row.runs_won), int(row.runs_lost), int(row.matches),
+            ])
 
         print(f"   📋 innings breakdown...")
-        keep_pairs = matchups.loc[matchups["balls"] >= smallest_balls_for_innings_detail,
-                                  ["striker", "bowler"]]
+        keep_pairs = matchup_careers.loc[
+            matchup_careers["balls"] >= smallest_balls_for_innings_detail,
+            ["striker", "bowler"]]
         innings = aggregate_innings(deliveries, keep_pairs)
         for row in innings.itertuples(index=False):
             bucket = innings_rows[(row.striker, row.bowler)].setdefault(code, [])
@@ -520,7 +589,7 @@ def main():
         print(f"   🎯 player totals...")
         player_totals[code] = aggregate_player_totals(deliveries)
 
-        del deliveries, results, matchups, team_records, innings
+        del deliveries, results, matchups, matchup_careers, team_records, innings
 
     # ─── Report any team spellings we may still be double-counting ────────────
     canonical_names = sorted({canonical_team(n) for n in raw_team_names if canonical_team(n)})
@@ -530,15 +599,12 @@ def main():
         for drop, keep_name in leftover.items():
             print(f"     {drop!r} -> {keep_name!r}")
         merged = defaultdict(dict)
-        for (batter, team), by_code in team_totals.items():
+        for (batter, team), by_code in team_years.items():
             target = leftover.get(team, team)
             existing = merged[(batter, target)]
-            for code, numbers in by_code.items():
-                if code in existing:
-                    existing[code] = [a + b for a, b in zip(existing[code], numbers)]
-                else:
-                    existing[code] = list(numbers)
-        team_totals = merged
+            for code, rows in by_code.items():
+                existing[code] = add_year_rows(existing.get(code, []), rows)
+        team_years = merged
         seen_team_ids = {leftover.get(t, t) for t in seen_team_ids}
     else:
         print("\n✅ no leftover duplicate team names")
@@ -559,14 +625,19 @@ def main():
     # ─── Batter-keyed files ───────────────────────────────────────────────────
     print("\n📦 packing player files...")
     batter_payloads = defaultdict(lambda: {"b": {}, "t": {}})
-    for (batter, bowler), by_code in matchup_totals.items():
-        batter_payloads[batter]["b"][bowler] = by_code
-    for (batter, team), by_code in team_totals.items():
-        batter_payloads[batter]["t"][team] = by_code
+    for (batter, bowler), by_code in matchup_years.items():
+        batter_payloads[batter]["b"][bowler] = {code: sorted(rows)
+                                                for code, rows in by_code.items()}
+    for (batter, team), by_code in team_years.items():
+        batter_payloads[batter]["t"][team] = {code: sorted(rows)
+                                              for code, rows in by_code.items()}
 
+    # The Bowler Strengths page has no year filter, so its files keep the
+    # smaller career-total shape instead of a row per year.
     bowler_payloads = defaultdict(lambda: {"b": {}})
-    for (batter, bowler), by_code in matchup_totals.items():
-        bowler_payloads[bowler]["b"][batter] = by_code
+    for (batter, bowler), by_code in matchup_years.items():
+        bowler_payloads[bowler]["b"][batter] = {code: career_total(rows)
+                                                for code, rows in by_code.items()}
 
     write_sharded("bat", dict(batter_payloads))
     write_sharded("bowl", dict(bowler_payloads))

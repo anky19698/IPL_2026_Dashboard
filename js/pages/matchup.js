@@ -1,7 +1,7 @@
 /* Player Matchup — one batter against one bowler, across every competition. */
 
 import * as store from "../store.js";
-import { DEFAULT_FILTER, filterById, combine, toStats } from "../formats.js";
+import { DEFAULT_FILTER, filterById, combineYears } from "../formats.js";
 import {
   pageHeader, searchBox, wireSearchBox, competitionChips, onChipPick,
   hud, innRow, emptyState, escapeHtml, collapse,
@@ -65,7 +65,7 @@ export async function render(el, params) {
     }
 
     const filter = filterById(competition);
-    const stats = toStats(combine(record, filter.codes));
+    const stats = combineYears(record, filter.codes, null);
 
     if (!stats) {
       output.innerHTML = `${breakdownBar(record)}
@@ -101,6 +101,12 @@ export async function render(el, params) {
       ${hud(stats.dotPct + "%", "Dot Ball %", "var(--text-dim)", "71,85,105")}
     </div>`;
 
+    html += `<div class="hud-grid hud-grid--3 animate-in stagger-2" style="margin-top:0.75rem;">
+      ${hud(stats.runsWon, "Runs in a Win", "var(--green)", "16,185,129")}
+      ${hud(stats.runsLost, "Runs in a Loss", "var(--red)", "239,68,68")}
+      ${hud(stats.runsDrawn, "Runs — Drawn / NR", "var(--text-muted)", "148,163,184")}
+    </div>`;
+
     const encounters = filter.codes
       .flatMap(code => (innings[code] || []).map(inn => ({ ...inn, competition: COMPETITION_NAMES[code] })))
       .sort((a, b) => String(b.date).localeCompare(String(a.date)));
@@ -129,7 +135,7 @@ export async function render(el, params) {
     const parts = Object.entries(COMPETITION_NAMES)
       .filter(([code]) => perCompetition[code])
       .map(([code, name]) => {
-        const s = toStats(perCompetition[code]);
+        const s = combineYears(perCompetition, [code], null);
         return `<span class="split-pill"><strong>${name}</strong> ${s.runs}(${s.balls})
           · ${s.outs} out</span>`;
       });

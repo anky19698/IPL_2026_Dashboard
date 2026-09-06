@@ -1,7 +1,7 @@
 /* Bowler Strengths — the batters a bowler gets out most, per competition. */
 
 import * as store from "../store.js";
-import { DEFAULT_FILTER, filterById, statsByOpponent } from "../formats.js";
+import { DEFAULT_FILTER, filterById, statsByOpponentCareer } from "../formats.js";
 import {
   pageHeader, searchBox, wireSearchBox, competitionChips, chipRow, onChipPick,
   rankTable, emptyState, escapeHtml,
@@ -65,7 +65,7 @@ export async function render(el, params) {
     }
     const filter = filterById(competition);
     const sort = SORTS.find(s => s.id === sortId) || SORTS[0];
-    let rows = statsByOpponent(record?.b, filter.codes).filter(r => r.outs > 0);
+    let rows = statsByOpponentCareer(record?.b, filter.codes).filter(r => r.outs > 0);
     if (sort.needs) rows = rows.filter(sort.needs);
     rows.sort(sort.compare);
 
