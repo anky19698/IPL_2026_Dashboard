@@ -72,7 +72,8 @@ body {
 }
 .sidebar__logo { font-size: 1.8rem; }
 .sidebar__title {
-  font-size: 1.2rem; font-weight: 800; letter-spacing: -0.02em;
+  /* "Cricket Dashboard" is long enough to need a wrap in a 240px sidebar. */
+  font-size: 1.05rem; font-weight: 800; letter-spacing: -0.02em; line-height: 1.2;
   background: linear-gradient(135deg, var(--gold), var(--orange));
   -webkit-background-clip: text; -webkit-text-fill-color: transparent;
 }
@@ -363,6 +364,8 @@ body {
     width: 20px; height: 2px; background: var(--text);
     border-radius: 1px; transition: all var(--transition);
   }
+  /* Keep the page title clear of the fixed hamburger button. */
+  .page-header { padding-left: 3.4rem; min-height: 2.6rem; }
   .page-header h1 { font-size: 1.4rem; }
   .hud-grid--3, .hud-grid--4, .hud-grid--5, .hud-grid--6 {
     grid-template-columns: repeat(2, 1fr);

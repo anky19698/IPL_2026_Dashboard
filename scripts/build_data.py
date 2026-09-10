@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cricket Analysis Hub — Data Builder
+Cricket Dashboard — Data Builder
 
 Downloads CricSheet ball-by-ball data for the IPL and for men's international
 cricket (Test, ODI, T20I) and writes the JSON files the static site reads.

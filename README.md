@@ -1,4 +1,4 @@
-# Cricket Analysis Hub
+# Cricket Dashboard
 
 A static dashboard for digging into batter and bowler matchups across the IPL
 and men's international cricket, built from [CricSheet](https://cricsheet.org)

@@ -1,4 +1,4 @@
-/* Cricket Analysis Hub — router and shell */
+/* Cricket Dashboard — router and shell */
 
 import * as strengthsPage from "./pages/strengths.js";
 import * as weaknessPage from "./pages/weakness.js";
