@@ -118,6 +118,9 @@ function derive(total) {
     average: outs ? +(runs / outs).toFixed(1) : null,
     ballsPerOut: outs ? +(balls / outs).toFixed(1) : null,
     dotPct: balls ? +(dots / balls * 100).toFixed(1) : 0,
+    /* Read from the bowling side, "runs" is runs conceded, so this is the
+       bowler's economy rate. */
+    economy: balls ? +(runs / (balls / 6)).toFixed(2) : 0,
     /* Runs in matches that ended in a draw, tie or no result — whatever the
        win and loss columns do not account for. */
     runsDrawn: runs - total.runsWon - total.runsLost,

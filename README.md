@@ -13,15 +13,15 @@ Every page can be filtered by competition:
 | IPL | IPL only |
 | Test / ODI / T20I | that format only |
 
-The three batter pages add a season filter on top of that. Pick a "from" and a
+The three batter pages and the two team pages add a season filter on top of that. Pick a "from" and a
 "to" year for a span, or set both to the same year for a single season; "All
 years" puts it back to the whole career. Only years the batter actually has a
 record in are offered, and the list follows whichever competition is selected.
 
-Those pages also carry **Runs (W)** and **Runs (L)** — runs made in matches the
-batter's own team went on to win or lose — and can be sorted by either. Drawn
-Tests, ties and no-results belong to neither column, so the two do not always
-add up to the total.
+The batter pages and Team vs Batters also carry **Runs (W)** and **Runs (L)** —
+runs made in matches the batter's own team went on to win or lose — and can be
+sorted by either. Drawn Tests, ties and no-results belong to neither column, so
+the two do not always add up to the total.
 
 ## Pages
 
@@ -30,6 +30,8 @@ add up to the total.
 | 💪 Batter Strengths | Which bowlers does this batter score most against? Sort by runs, sixes, fours, boundaries, or runs in a win or a loss. |
 | 🎯 Batter Weakness | Which bowlers get this batter out most? Sort by dismissals, balls per dismissal, lowest strike rate, dot balls, or runs in a win or a loss. |
 | 🛡 Batter vs Teams | Which opposition does this batter score most against? Same sort options as Batter Strengths. |
+| 🩹 Team vs Batters | Pick a team: which batters score most against them? Same filters and sorts as Batter Strengths. |
+| 🧨 Team vs Bowlers | Pick a team: which bowlers take most wickets against them? Sort by wickets, dot balls, balls bowled or lowest economy. |
 | ⚔️ Player Matchup | One batter against one bowler, with every encounter listed. |
 | ⚾ Bowler Strengths | Which batters does this bowler dominate? |
 | 🏅 Milestones | Active players closing in on a career landmark. |
@@ -82,9 +84,15 @@ since that page has no season filter.
 | `bat_index.json` / `bowl_index.json` | player name → shard number |
 | `bat/<n>.json` | per batter: per-year rows against each bowler (`b`) and each team (`t`) |
 | `bowl/<n>.json` | per bowler: career totals against each batter (`b`) |
+| `tbat/<team>.json` | per team: per-year rows for every batter who has scored against them |
+| `tbowl/<team>.json` | per team: per-year rows for every bowler who has taken wickets against them |
+| `team_index.json` | team id → file name, for the batting and bowling sets |
 | `inn/<n>.json` | per batter-vs-bowler pairing: every individual encounter |
 | `venues.json` | per ground: innings averages and result splits |
 | `milestones.json` | players approaching a career landmark |
+
+Teams get one file each rather than a hashed shard, because there are only a
+couple of hundred of them and a reader only ever looks at one at a time.
 
 Per-player data is spread across numbered shard files so a page only downloads
 the slice it needs instead of a single large file. A name always maps to the
@@ -96,6 +104,11 @@ Number lists are positional:
 - a batter's year row against a bowler —
   `[year, balls, runs, dismissals, dots, fours, sixes, runs won, runs lost]`
 - a batter's year row against a team — the same, plus `matches` on the end
+- a bowler's year row against a team — the same positions again, read from the
+  bowling side: balls bowled, runs conceded, wickets taken. That makes
+  `runs / outs` the bowling average and `balls / outs` the bowling strike rate
+  without any extra fields. The two win/loss slots are left at zero, since they
+  describe a batter's own team result
 - a bowler's career total against a batter —
   `[balls, runs, dismissals, dots, fours, sixes]`
 - an encounter — `[runs, balls, out, date, venue index, fours, sixes]`, where the

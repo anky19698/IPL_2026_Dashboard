@@ -3,6 +3,8 @@
 import * as strengthsPage from "./pages/strengths.js";
 import * as weaknessPage from "./pages/weakness.js";
 import * as batterTeamsPage from "./pages/batterteams.js";
+import * as teamBattingPage from "./pages/teambatting.js";
+import * as teamBowlingPage from "./pages/teambowling.js";
 import * as matchupPage from "./pages/matchup.js";
 import * as bowlerPage from "./pages/bowler.js";
 import * as milestonesPage from "./pages/milestones.js";
@@ -17,6 +19,8 @@ const pages = {
   strengths:    strengthsPage,
   weakness:     weaknessPage,
   batterteams:  batterTeamsPage,
+  teambatting:  teamBattingPage,
+  teambowling:  teamBowlingPage,
   matchup:      matchupPage,
   bowler:       bowlerPage,
   milestones:   milestonesPage,

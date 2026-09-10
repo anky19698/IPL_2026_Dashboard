@@ -11,7 +11,7 @@ Or let the daily GitHub Action do it.
 Everything you might want to change lives in the SETTINGS block below.
 """
 
-import io, json, glob, os, shutil, sys, time, zipfile, zlib
+import io, json, glob, os, re, shutil, sys, time, zipfile, zlib
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
@@ -85,6 +85,9 @@ smallest_balls_for_a_matchup = 3
 
 # Ball-by-ball innings detail is only kept for pairings this size or larger.
 smallest_balls_for_innings_detail = 10
+
+# A bowler-vs-team record needs at least this many balls bowled to be kept.
+smallest_balls_for_a_team_bowling_record = 6
 
 # A batter-vs-team record needs at least this many balls to be kept.
 smallest_balls_for_a_team_record = 6
@@ -328,6 +331,27 @@ def aggregate_batter_vs_team(deliveries):
     return per_year
 
 
+def aggregate_bowler_vs_team(deliveries):
+    """
+    Per-year rows for every bowler against every batting side.
+
+    The rows come out in the same positions as the batting ones so the website
+    can add them up with the same code. Read from the bowler's side of it:
+    "balls" is balls bowled, "runs" is runs conceded and "outs" is wickets
+    taken, which also makes runs/outs the bowling average and balls/outs the
+    bowling strike rate without any extra work.
+    """
+    careers = deliveries.groupby(["bowler", "batting_team_id"], sort=False).agg(
+        balls=("legal", "sum")).reset_index()
+    careers = careers[careers["balls"] >= smallest_balls_for_a_team_bowling_record]
+
+    per_year = deliveries.groupby(["bowler", "batting_team_id", "year"], sort=False).agg(
+        matches=("match_id", "nunique"), **YEAR_TOTALS).reset_index()
+    per_year = per_year.merge(careers[["bowler", "batting_team_id"]],
+                              on=["bowler", "batting_team_id"], how="inner")
+    return per_year
+
+
 def aggregate_innings(deliveries, keep_pairs):
     grouped = deliveries.groupby(["striker", "bowler", "match_id", "innings"], sort=False).agg(
         runs=("runs_off_bat", "sum"),
@@ -486,6 +510,53 @@ def career_total(year_rows):
     return [balls, runs, outs, dots, fours, sixes]
 
 
+def merge_duplicate_teams(records, merges):
+    """Fold any (player, team) records whose team turned out to be a duplicate
+    spelling into the team we decided to keep."""
+    merged = defaultdict(dict)
+    for (player, team), by_code in records.items():
+        target = merges.get(team, team)
+        existing = merged[(player, target)]
+        for code, rows in by_code.items():
+            existing[code] = add_year_rows(existing.get(code, []), rows)
+    return merged
+
+
+def team_file_name(team_id):
+    """A safe file name for a team, so each team gets its own small file."""
+    slug = re.sub(r"[^a-z0-9]+", "-", str(team_id).lower()).strip("-")
+    return slug or "team"
+
+
+def write_per_team(folder, records):
+    """
+    One file per team, holding every player who has a record against them.
+
+    Teams get a file each rather than a hashed shard because there are only a
+    couple of hundred of them, and a reader only ever looks at one at a time.
+    """
+    by_team = defaultdict(dict)
+    for (player, team), by_code in records.items():
+        by_team[team][player] = {code: sorted(rows) for code, rows in by_code.items()}
+
+    target = os.path.join(DATA_DIR, folder)
+    if os.path.isdir(target):
+        shutil.rmtree(target)
+
+    names, total, biggest = {}, 0, 0
+    for team in sorted(by_team):
+        name = team_file_name(team)
+        if name in names.values():
+            raise RuntimeError(f"two teams want the same file name: {name}")
+        names[team] = name
+        size = write_json(f"{folder}/{name}.json", by_team[team])
+        total += size
+        biggest = max(biggest, size)
+    print(f"   📁 {folder}/  ({len(names)} files, {total/1024/1024:.1f} MB, "
+          f"largest {biggest/1024:.0f} KB)")
+    return names
+
+
 def shard_for(name):
     """Which file a player's data lives in. Stable, so unchanged players keep
     the same file and the daily commit stays small."""
@@ -526,6 +597,7 @@ def main():
 
     matchup_years = defaultdict(dict)       # (batter, bowler) -> {code: [year rows]}
     team_years = defaultdict(dict)          # (batter, team)   -> {code: [year rows]}
+    bowling_team_years = defaultdict(dict)  # (bowler, team)   -> {code: [year rows]}
     innings_rows = defaultdict(dict)        # (batter, bowler) -> {code: [rows]}
     venue_totals = {}                       # code -> {raw venue: counters}
     player_totals = {}                      # code -> (batting, bowling, teams)
@@ -572,6 +644,19 @@ def main():
                 int(row.runs_won), int(row.runs_lost), int(row.matches),
             ])
 
+        print(f"   🎳 bowler vs team...")
+        bowling_records = aggregate_bowler_vs_team(deliveries)
+        for row in bowling_records.itertuples(index=False):
+            if not row.batting_team_id:
+                continue
+            # The win/loss slots stay empty here: they describe a batter's own
+            # team result, which does not mean anything from the bowling side.
+            bowling_team_years[(row.bowler, row.batting_team_id)].setdefault(code, []).append([
+                int(row.year), int(row.balls), int(row.runs), int(row.outs),
+                int(row.dots), int(row.fours), int(row.sixes),
+                0, 0, int(row.matches),
+            ])
+
         print(f"   📋 innings breakdown...")
         keep_pairs = matchup_careers.loc[
             matchup_careers["balls"] >= smallest_balls_for_innings_detail,
@@ -589,7 +674,8 @@ def main():
         print(f"   🎯 player totals...")
         player_totals[code] = aggregate_player_totals(deliveries)
 
-        del deliveries, results, matchups, matchup_careers, team_records, innings
+        del deliveries, results, matchups, matchup_careers, team_records
+        del bowling_records, innings
 
     # ─── Report any team spellings we may still be double-counting ────────────
     canonical_names = sorted({canonical_team(n) for n in raw_team_names if canonical_team(n)})
@@ -598,13 +684,8 @@ def main():
         print("\n⚠️  merging near-duplicate team names:")
         for drop, keep_name in leftover.items():
             print(f"     {drop!r} -> {keep_name!r}")
-        merged = defaultdict(dict)
-        for (batter, team), by_code in team_years.items():
-            target = leftover.get(team, team)
-            existing = merged[(batter, target)]
-            for code, rows in by_code.items():
-                existing[code] = add_year_rows(existing.get(code, []), rows)
-        team_years = merged
+        team_years = merge_duplicate_teams(team_years, leftover)
+        bowling_team_years = merge_duplicate_teams(bowling_team_years, leftover)
         seen_team_ids = {leftover.get(t, t) for t in seen_team_ids}
     else:
         print("\n✅ no leftover duplicate team names")
@@ -641,6 +722,15 @@ def main():
 
     write_sharded("bat", dict(batter_payloads))
     write_sharded("bowl", dict(bowler_payloads))
+
+    # ─── Team-keyed files (who has done most damage to each side) ─────────────
+    batting_files = write_per_team("tbat", team_years)
+    bowling_files = write_per_team("tbowl", bowling_team_years)
+    write_json("team_index.json", {
+        "batting": batting_files,
+        "bowling": bowling_files,
+    })
+    print(f"   📁 team_index.json ({len(batting_files)} batting, {len(bowling_files)} bowling)")
 
     # ─── Innings files (keyed by batter so the matchup page loads one shard) ──
     grouped_innings = defaultdict(dict)
@@ -718,6 +808,7 @@ def main():
         "match_counts": match_counts,
         "batters": len(batter_payloads),
         "bowlers": len(bowler_payloads),
+        "teams": len(teams_out),
     })
     print("   📁 meta.json")
     print("\n✅ done — data/ is up to date")

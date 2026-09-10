@@ -1,8 +1,13 @@
-/* Shared "pick a batter, get a ranked table" page.
+/* Shared "pick something, get a ranked table" page.
 
-   Batter Strengths, Batter Weakness and Batter vs Teams are the same page with
-   a different source list, sort options and columns, so they all come from
-   here. Each of those page files just hands over its settings. */
+   Five pages are this same page with a different thing to pick, a different
+   list to rank, and different columns:
+
+     Batter Strengths / Weakness / vs Teams — pick a batter
+     Team Weakness (Batting / Bowling)      — pick a team
+
+   makeBatterRankingPage and makeTeamRankingPage below fill in the parts that
+   differ, so each page file only has to describe its columns and sorts. */
 
 import * as store from "./store.js";
 import { DEFAULT_FILTER, filterById, statsByOpponent, seasonsAvailable } from "./formats.js";
@@ -14,13 +19,22 @@ import {
 
 export const ROWS_TO_SHOW = 10;
 
-export function makeBatterRankingPage(settings) {
+function makeRankingPage(settings) {
   return {
     async render(el, params) {
-      const [index, teams] = await Promise.all([store.batterIndex(), store.teams()]);
-      const batterNames = Object.keys(index);
+      const teams = await store.teams();
+      const { labels, keyOf } = await settings.pickList(teams);
 
-      let batter = params ? decodeURIComponent(params) : "";
+      /* What the reader typed vs what the data file is keyed by. For batters
+         these are the same; for teams the reader sees "India" and the file is
+         keyed by the team id. */
+      const keyFor = label => (keyOf ? keyOf[label] : label);
+
+      let chosen = "";
+      if (params) {
+        const wanted = decodeURIComponent(params);
+        if (labels.includes(wanted)) chosen = wanted;
+      }
       let competition = DEFAULT_FILTER;
       let sortId = settings.sorts[0].id;
       let showAll = false;
@@ -31,17 +45,17 @@ export function makeBatterRankingPage(settings) {
       el.innerHTML = `
         ${pageHeader(settings.icon, settings.title, settings.subtitle)}
         <div class="picker-row">
-          ${searchBox("rankBatter", "Search a batter…", "🏏")}
+          ${searchBox("rankPick", settings.searchPlaceholder, settings.searchIcon)}
         </div>
         ${competitionChips(competition)}
         <div id="rankSeason"></div>
         ${chipRow("sort", settings.sorts, sortId, "Sort by")}
         <div id="rankResult"></div>`;
 
-      wireSearchBox("rankBatter", batterNames, name => {
-        batter = name;
-        window.history.replaceState(null, "", `#${settings.route}/${encodeURIComponent(name)}`);
-        loadBatter();
+      wireSearchBox("rankPick", labels, label => {
+        chosen = label;
+        window.history.replaceState(null, "", `#${settings.route}/${encodeURIComponent(label)}`);
+        loadChosen();
       });
 
       onChipPick(el, "competition", value => {
@@ -55,13 +69,14 @@ export function makeBatterRankingPage(settings) {
       const output = document.getElementById("rankResult");
       const seasonSlot = document.getElementById("rankSeason");
 
-      async function loadBatter() {
-        if (!batter) { output.innerHTML = startPrompt(); return; }
-        output.innerHTML = `<div class="loader"><div class="loader__spinner"></div><p>Loading ${escapeHtml(batter)}…</p></div>`;
+      async function loadChosen() {
+        if (!chosen) { output.innerHTML = startPrompt(); return; }
+        output.innerHTML = `<div class="loader"><div class="loader__spinner"></div>
+          <p>Loading ${escapeHtml(chosen)}…</p></div>`;
         try {
-          record = await store.batterRecord(batter);
+          record = await settings.loadRecord(keyFor(chosen));
         } catch {
-          output.innerHTML = emptyState("⚠️", "Could not load this batter's data.");
+          output.innerHTML = emptyState("⚠️", "Could not load this data.");
           return;
         }
         showAll = false;
@@ -69,12 +84,16 @@ export function makeBatterRankingPage(settings) {
         paint();
       }
 
-      /* The year list follows whichever batter and competition are showing, so
-         you are only ever offered seasons that actually have something in them.
-         An existing pick is kept where it still fits and widened where it does
-         not, rather than silently emptying the table. */
+      function opponents() {
+        return record ? settings.opponentsOf(record, settings.source) : null;
+      }
+
+      /* The year list follows whatever is showing, so you are only ever offered
+         seasons that actually have something in them. An existing pick is kept
+         where it still fits and widened where it does not, rather than silently
+         emptying the table. */
       function refreshSeasons() {
-        years = record ? seasonsAvailable(record[settings.source], filterById(competition).codes) : [];
+        years = record ? seasonsAvailable(opponents(), filterById(competition).codes) : [];
         if (!years.length) {
           season = null;
           seasonSlot.innerHTML = "";
@@ -87,8 +106,7 @@ export function makeBatterRankingPage(settings) {
         drawSeasonPicker();
       }
 
-      /* Draw the picker and wire it up. Picking a year redraws it so the two
-         selects show the clamped span, which means wiring it again. */
+      /* Drawing the picker replaces its markup, so wire it up again each time. */
       function drawSeasonPicker() {
         seasonSlot.innerHTML = seasonPicker(years, season.from, season.to);
         wireSeasonPicker(seasonSlot, years, season, picked => {
@@ -101,13 +119,13 @@ export function makeBatterRankingPage(settings) {
 
       function startPrompt() {
         return `<div class="empty"><div class="empty__icon">${settings.icon}</div>
-          <div class="empty__text">Search for a batter above to see ${escapeHtml(settings.subject)}</div></div>`;
+          <div class="empty__text">${escapeHtml(settings.prompt)}</div></div>`;
       }
 
       function paint() {
-        if (!batter) { output.innerHTML = startPrompt(); return; }
+        if (!chosen) { output.innerHTML = startPrompt(); return; }
         if (!record) {
-          output.innerHTML = emptyState("🚫", `No data found for <strong>${escapeHtml(batter)}</strong>`);
+          output.innerHTML = emptyState("🚫", `No data found for <strong>${escapeHtml(chosen)}</strong>`);
           return;
         }
 
@@ -115,14 +133,14 @@ export function makeBatterRankingPage(settings) {
         const sort = settings.sorts.find(s => s.id === sortId) || settings.sorts[0];
         const spanLabel = describeSeason(years, season);
 
-        let rows = statsByOpponent(record[settings.source], filter.codes, season);
+        let rows = statsByOpponent(opponents(), filter.codes, season);
         if (settings.keepRow) rows = rows.filter(settings.keepRow);
         if (sort.needs) rows = rows.filter(sort.needs);
         rows.sort(sort.compare);
 
         if (!rows.length) {
           output.innerHTML = emptyState("🚫",
-            `<strong>${escapeHtml(batter)}</strong> has no ${escapeHtml(settings.subject)}
+            `<strong>${escapeHtml(chosen)}</strong> has no ${escapeHtml(settings.subject)}
              in <strong>${filter.label}</strong> for <strong>${escapeHtml(spanLabel)}</strong>`);
           return;
         }
@@ -131,7 +149,7 @@ export function makeBatterRankingPage(settings) {
         const columns = settings.columns(teams);
 
         let html = `<div class="rank-summary animate-in">
-          <span class="rank-summary__name">🏏 ${escapeHtml(batter)}</span>
+          <span class="rank-summary__name">${settings.badge(keyFor(chosen), teams, chosen)}</span>
           <span class="rank-summary__meta">${filter.label} · ${escapeHtml(spanLabel)}
             · sorted by ${escapeHtml(sort.label)}
             · showing ${shown.length} of ${rows.length}${sort.note ? ` · ${escapeHtml(sort.note)}` : ""}</span>
@@ -139,9 +157,9 @@ export function makeBatterRankingPage(settings) {
 
         html += rankTable(columns, shown);
 
-        if (rows.some(row => row.runsDrawn > 0)) {
+        if (settings.explainWinLoss && rows.some(row => row.runsDrawn > 0)) {
           html += `<p class="table-note">Runs (W) and Runs (L) are runs made in matches
-            this batter's own team won or lost. Draws, ties and no-results count in
+            the batter's own team won or lost. Draws, ties and no-results count in
             neither, so the two do not always add up to the total.</p>`;
         }
 
@@ -159,18 +177,61 @@ export function makeBatterRankingPage(settings) {
         });
       }
 
-      if (batter && index[batter] !== undefined) {
-        document.getElementById("rankBatter").value = batter;
-        await loadBatter();
+      if (chosen) {
+        document.getElementById("rankPick").value = chosen;
+        await loadChosen();
       } else {
-        batter = "";
         output.innerHTML = startPrompt();
       }
     },
   };
 }
 
-/* ─── Column and sort building blocks the three pages share ───────────────── */
+/* ─── Pick a batter ────────────────────────────────────────────────────────── */
+
+export function makeBatterRankingPage(settings) {
+  return makeRankingPage({
+    ...settings,
+    searchIcon: "🏏",
+    searchPlaceholder: "Search a batter…",
+    prompt: `Search for a batter above to see ${settings.subject}`,
+    explainWinLoss: true,
+    async pickList() {
+      const index = await store.batterIndex();
+      return { labels: Object.keys(index), keyOf: null };
+    },
+    loadRecord: name => store.batterRecord(name),
+    opponentsOf: (record, source) => record[source],
+    badge: (_key, _teams, label) => `🏏 ${escapeHtml(label)}`,
+  });
+}
+
+/* ─── Pick a team ──────────────────────────────────────────────────────────── */
+
+/* settings.side is "batting" (rank the batters who have scored against them)
+   or "bowling" (rank the bowlers who have taken wickets against them). */
+export function makeTeamRankingPage(settings) {
+  return makeRankingPage({
+    ...settings,
+    searchIcon: "🛡",
+    searchPlaceholder: "Search a team…",
+    prompt: `Search for a team above to see ${settings.subject}`,
+    async pickList(teams) {
+      const index = await store.teamIndex();
+      const keyOf = {};
+      for (const teamId of Object.keys(index[settings.side] || {})) {
+        keyOf[teams[teamId]?.name || teamId] = teamId;
+      }
+      return { labels: Object.keys(keyOf).sort((a, b) => a.localeCompare(b)), keyOf };
+    },
+    loadRecord: teamId => store.teamRecord(settings.side, teamId),
+    /* A team file is already the map of player to their year rows. */
+    opponentsOf: record => record,
+    badge: (teamId, teams) => teamCell(teamId, teams),
+  });
+}
+
+/* ─── Column and sort building blocks the pages share ─────────────────────── */
 
 export const opponentColumn = (label, icon) => ({
   label, align: "left",
@@ -197,8 +258,8 @@ export const numberColumn = (label, pick, options = {}) => ({
   },
 });
 
-/* Runs made in matches the batter's team won, and lost. Shared by all three
-   batter pages so the columns read the same everywhere. */
+/* Runs made in matches the batter's team won, and lost. Shared by the batter
+   pages and the team batting page so the columns read the same everywhere. */
 export const RUNS_WON_COLUMN = numberColumn("Runs (W)", r => r.runsWon,
   { strong: true, color: "var(--green)" });
 export const RUNS_LOST_COLUMN = numberColumn("Runs (L)", r => r.runsLost,
@@ -224,7 +285,9 @@ export const SORT_BY_SIXES      = { id: "sixes",      label: "Sixes hit",       
 export const SORT_BY_FOURS      = { id: "fours",      label: "Fours hit",         compare: biggestFirst(r => r.fours) };
 export const SORT_BY_BOUNDARIES = { id: "boundaries", label: "Boundaries (4s+6s)", compare: biggestFirst(r => r.boundaries) };
 export const SORT_BY_OUTS       = { id: "outs",       label: "Dismissals",        compare: biggestFirst(r => r.outs) };
+export const SORT_BY_WICKETS    = { id: "wickets",    label: "Wickets",           compare: biggestFirst(r => r.outs) };
 export const SORT_BY_DOTS       = { id: "dots",       label: "Dot balls",         compare: biggestFirst(r => r.dots) };
+export const SORT_BY_BALLS      = { id: "balls",      label: "Balls bowled",      compare: biggestFirst(r => r.balls) };
 export const SORT_BY_RUNS_WON   = { id: "runswon",    label: "Runs in a win",     compare: biggestFirst(r => r.runsWon) };
 export const SORT_BY_RUNS_LOST  = { id: "runslost",   label: "Runs in a loss",    compare: biggestFirst(r => r.runsLost) };
 export const SORT_BY_BALLS_PER_OUT = {
@@ -234,4 +297,8 @@ export const SORT_BY_BALLS_PER_OUT = {
 export const SORT_BY_STRIKE_RATE_LOW = {
   id: "srlow", label: "Strike rate (lowest)", compare: smallestFirst(r => r.strikeRate),
   needs: r => r.balls >= 18, note: "min 18 balls",
+};
+export const SORT_BY_ECONOMY_LOW = {
+  id: "econlow", label: "Economy (lowest)", compare: smallestFirst(r => r.economy),
+  needs: r => r.balls >= 60, note: "min 10 overs",
 };

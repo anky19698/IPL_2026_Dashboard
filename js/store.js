@@ -21,6 +21,7 @@ export const venues      = () => load("venues");
 export const milestones  = () => load("milestones");
 export const batterIndex = () => load("bat_index");
 export const bowlerIndex = () => load("bowl_index");
+export const teamIndex   = () => load("team_index");
 
 /* Everything a single batter has done: "b" is per bowler, "t" is per team. */
 export async function batterRecord(name) {
@@ -38,6 +39,19 @@ export async function bowlerRecord(name) {
   if (shard === undefined) return null;
   const bundle = await load(`bowl/${shard}`);
   return bundle[name] || null;
+}
+
+/* Everyone who has a record against one team.
+
+   "batting" gives the batters who have scored against them, "bowling" gives
+   the bowlers who have taken wickets against them. Each team has its own file,
+   so picking a team downloads only that team. */
+export async function teamRecord(side, teamId) {
+  const index = await teamIndex();
+  const fileName = index[side]?.[teamId];
+  if (!fileName) return null;
+  const folder = side === "batting" ? "tbat" : "tbowl";
+  return load(`${folder}/${fileName}`);
 }
 
 /* Ball-by-ball innings for one batter-vs-bowler pairing.

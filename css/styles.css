@@ -107,14 +107,19 @@ body {
   display: none; position: fixed; bottom: 0; left: 0; right: 0;
   background: rgba(11,17,32,0.97); backdrop-filter: blur(20px);
   border-top: 1px solid var(--border); z-index: 100;
-  justify-content: space-around; padding: 0.4rem 0 calc(0.4rem + env(safe-area-inset-bottom));
+  /* Nine tabs is a squeeze on a narrow phone, so let the bar scroll sideways
+     rather than crushing the labels. */
+  justify-content: space-between; padding: 0.35rem 0.2rem calc(0.35rem + env(safe-area-inset-bottom));
+  overflow-x: auto; scrollbar-width: none;
 }
+.bottom-nav::-webkit-scrollbar { display: none; }
 .bnav {
   display: flex; flex-direction: column; align-items: center;
-  text-decoration: none; color: var(--text-muted); font-size: 1.1rem;
-  padding: 0.3rem 0.2rem; transition: color var(--transition); gap: 2px;
+  text-decoration: none; color: var(--text-muted); font-size: 1rem;
+  padding: 0.25rem 0.1rem; transition: color var(--transition); gap: 1px;
+  flex: 1 0 auto; min-width: 36px;
 }
-.bnav small { font-size: 0.55rem; font-weight: 500; letter-spacing: -0.01em; }
+.bnav small { font-size: 0.5rem; font-weight: 500; letter-spacing: -0.02em; white-space: nowrap; }
 .bnav.active { color: var(--gold); }
 .bnav.active small { color: var(--gold); }
 
