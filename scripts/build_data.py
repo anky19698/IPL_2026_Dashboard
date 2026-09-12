@@ -41,11 +41,20 @@ RAW_DIR = os.path.join(ROOT, ".cricsheet_raw")
 
 # The four competitions we pull. The short code is what we use as a key inside
 # the JSON files, so keep these stable — the website reads the same codes.
+# "innings" is how many innings a real match of this kind has. CricSheet numbers
+# a super over as innings 3 and 4 (and 5, 6, ... when a match goes to more than
+# one), so anything above this count is a super over and gets dropped — official
+# records do not put super over runs or wickets into a player's totals. A Test
+# genuinely has four innings, so nothing is dropped there.
 COMPETITIONS = [
-    {"code": "p", "name": "IPL",  "slug": "ipl",   "url": "https://cricsheet.org/downloads/ipl_male_csv2.zip"},
-    {"code": "t", "name": "Test", "slug": "tests", "url": "https://cricsheet.org/downloads/tests_male_csv2.zip"},
-    {"code": "o", "name": "ODI",  "slug": "odis",  "url": "https://cricsheet.org/downloads/odis_male_csv2.zip"},
-    {"code": "i", "name": "T20I", "slug": "t20s",  "url": "https://cricsheet.org/downloads/t20s_male_csv2.zip"},
+    {"code": "p", "name": "IPL",  "slug": "ipl",   "innings": 2,
+     "url": "https://cricsheet.org/downloads/ipl_male_csv2.zip"},
+    {"code": "t", "name": "Test", "slug": "tests", "innings": 4,
+     "url": "https://cricsheet.org/downloads/tests_male_csv2.zip"},
+    {"code": "o", "name": "ODI",  "slug": "odis",  "innings": 2,
+     "url": "https://cricsheet.org/downloads/odis_male_csv2.zip"},
+    {"code": "i", "name": "T20I", "slug": "t20s",  "innings": 2,
+     "url": "https://cricsheet.org/downloads/t20s_male_csv2.zip"},
 ]
 
 # CricSheet blocks requests that do not look like they came from a browser.
@@ -117,7 +126,7 @@ BOWLER_WICKET_TYPES = {"bowled", "caught", "caught and bowled", "lbw", "stumped"
 # Columns we actually read out of the CricSheet CSVs.
 DELIVERY_COLUMNS = ["match_id", "innings", "start_date", "venue", "batting_team",
                     "bowling_team", "striker", "bowler", "runs_off_bat", "extras",
-                    "wides", "wicket_type", "player_dismissed"]
+                    "wides", "wicket_type", "player_dismissed", "non_boundary"]
 
 # Known IPL venue spellings collapsed into one name.
 IPL_VENUE_NAMES = {
@@ -208,7 +217,7 @@ def fetch_archive(url):
     raise RuntimeError(f"could not download {url} — {last_problem}")
 
 
-def read_deliveries(folder):
+def read_deliveries(folder, innings_in_a_match):
     # One file per match, named after the match id. Some archives also ship an
     # all_matches.csv holding the same deliveries again, so only take the
     # numbered files or every ball would be counted twice.
@@ -223,6 +232,15 @@ def read_deliveries(folder):
     if not frames:
         raise RuntimeError(f"no delivery files found in {folder}")
     deliveries = pd.concat(frames, ignore_index=True)
+
+    # Drop the super over. It is scored as an extra innings but never counts
+    # towards a player's runs, wickets or averages.
+    super_over = deliveries["innings"] > innings_in_a_match
+    if super_over.any():
+        print(f"   skipping {int(super_over.sum())} super over deliveries "
+              f"from {deliveries.loc[super_over, 'match_id'].nunique()} matches")
+        deliveries = deliveries[~super_over]
+
     deliveries["match_id"] = deliveries["match_id"].astype(str)
     deliveries["start_date"] = pd.to_datetime(deliveries["start_date"], errors="coerce")
     return deliveries
@@ -258,8 +276,12 @@ def add_helper_columns(deliveries, match_results):
     deliveries["runs_off_bat"] = runs
 
     deliveries["legal"] = deliveries["wides"].isna().astype("int32")
-    deliveries["four"] = (runs == 4).astype("int32")
-    deliveries["six"] = (runs == 6).astype("int32")
+
+    # Four or six runs that were all run count as runs but not as a boundary,
+    # which is how the record books have them. CricSheet flags those balls.
+    off_the_rope = deliveries["non_boundary"].isna()
+    deliveries["four"] = ((runs == 4) & off_the_rope).astype("int32")
+    deliveries["six"] = ((runs == 6) & off_the_rope).astype("int32")
     deliveries["dot"] = ((runs == 0) & deliveries["wides"].isna()).astype("int32")
 
     credited = deliveries["wicket_type"].isin(BOWLER_WICKET_TYPES)
@@ -611,7 +633,7 @@ def main():
         folder = download_competition(comp)
 
         print(f"📊 reading {comp['name']}...")
-        deliveries = read_deliveries(folder)
+        deliveries = read_deliveries(folder, comp["innings"])
         results = read_match_results(folder)
         match_counts[comp["name"]] = int(deliveries["match_id"].nunique())
         print(f"   {len(deliveries):,} deliveries across {match_counts[comp['name']]:,} matches")
