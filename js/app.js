@@ -7,6 +7,8 @@ import * as teamBattingPage from "./pages/teambatting.js";
 import * as teamBowlingPage from "./pages/teambowling.js";
 import * as matchupPage from "./pages/matchup.js";
 import * as bowlerPage from "./pages/bowler.js";
+import * as battingLeadersPage from "./pages/battingleaders.js";
+import * as bowlingLeadersPage from "./pages/bowlingleaders.js";
 import * as milestonesPage from "./pages/milestones.js";
 import * as venuesPage from "./pages/venues.js";
 import * as store from "./store.js";
@@ -23,6 +25,8 @@ const pages = {
   teambowling:  teamBowlingPage,
   matchup:      matchupPage,
   bowler:       bowlerPage,
+  battingleaders: battingLeadersPage,
+  bowlingleaders: bowlingLeadersPage,
   milestones:   milestonesPage,
   venues:       venuesPage,
 };

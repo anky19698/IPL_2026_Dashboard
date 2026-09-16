@@ -5,9 +5,10 @@
 
      Batter Strengths / Weakness / vs Teams — pick a batter
      Team Weakness (Batting / Bowling)      — pick a team
+     Batting / Bowling Leaders              — pick nothing, rank everyone
 
-   makeBatterRankingPage and makeTeamRankingPage below fill in the parts that
-   differ, so each page file only has to describe its columns and sorts. */
+   The three make*Page helpers below fill in the parts that differ, so each
+   page file only has to describe its columns and sorts. */
 
 import * as store from "./store.js";
 import { DEFAULT_FILTER, filterById, statsByOpponent, seasonsAvailable } from "./formats.js";
@@ -23,15 +24,21 @@ function makeRankingPage(settings) {
   return {
     async render(el, params) {
       const teams = await store.teams();
-      const { labels, keyOf } = await settings.pickList(teams);
+
+      /* A leaderboard ranks everybody at once, so it has nothing to pick and
+         no search box. Every other page picks a batter or a team first. */
+      const hasPicker = Boolean(settings.pickList);
+      const { labels, keyOf } = hasPicker
+        ? await settings.pickList(teams)
+        : { labels: [], keyOf: null };
 
       /* What the reader typed vs what the data file is keyed by. For batters
          these are the same; for teams the reader sees "India" and the file is
          keyed by the team id. */
       const keyFor = label => (keyOf ? keyOf[label] : label);
 
-      let chosen = "";
-      if (params) {
+      let chosen = hasPicker ? "" : settings.title;
+      if (params && hasPicker) {
         const wanted = decodeURIComponent(params);
         if (labels.includes(wanted)) chosen = wanted;
       }
@@ -41,22 +48,27 @@ function makeRankingPage(settings) {
       let record = null;
       let years = [];
       let season = null;
+      /* Whether the reader has actually chosen a season. Until they do, the
+         range follows whatever is on screen instead of sticking. */
+      let seasonChosen = false;
 
       el.innerHTML = `
         ${pageHeader(settings.icon, settings.title, settings.subtitle)}
-        <div class="picker-row">
+        ${hasPicker ? `<div class="picker-row">
           ${searchBox("rankPick", settings.searchPlaceholder, settings.searchIcon)}
-        </div>
+        </div>` : ""}
         ${competitionChips(competition)}
         <div id="rankSeason"></div>
         ${chipRow("sort", settings.sorts, sortId, "Sort by")}
         <div id="rankResult"></div>`;
 
-      wireSearchBox("rankPick", labels, label => {
-        chosen = label;
-        window.history.replaceState(null, "", `#${settings.route}/${encodeURIComponent(label)}`);
-        loadChosen();
-      });
+      if (hasPicker) {
+        wireSearchBox("rankPick", labels, label => {
+          chosen = label;
+          window.history.replaceState(null, "", `#${settings.route}/${encodeURIComponent(label)}`);
+          loadChosen();
+        });
+      }
 
       onChipPick(el, "competition", value => {
         competition = value;
@@ -89,9 +101,13 @@ function makeRankingPage(settings) {
       }
 
       /* The year list follows whatever is showing, so you are only ever offered
-         seasons that actually have something in them. An existing pick is kept
-         where it still fits and widened where it does not, rather than silently
-         emptying the table. */
+         seasons that actually have something in them.
+
+         If the reader has not picked a season, the range opens out to whatever
+         the current competition covers. Switching from IPL to Test should not
+         quietly leave the range stuck at the IPL years and hide the earlier
+         Tests. Once they have picked, the pick is kept wherever it still fits
+         and clamped where it does not. */
       function refreshSeasons() {
         years = record ? seasonsAvailable(opponents(), filterById(competition).codes) : [];
         if (!years.length) {
@@ -100,9 +116,13 @@ function makeRankingPage(settings) {
           return;
         }
         const first = years[0], last = years[years.length - 1];
-        const from = Math.min(Math.max(season?.from ?? first, first), last);
-        const to = Math.min(Math.max(season?.to ?? last, first), last);
-        season = { from: Math.min(from, to), to: Math.max(from, to) };
+        if (!seasonChosen || !season) {
+          season = { from: first, to: last };
+        } else {
+          const from = Math.min(Math.max(season.from, first), last);
+          const to = Math.min(Math.max(season.to, first), last);
+          season = { from: Math.min(from, to), to: Math.max(from, to) };
+        }
         drawSeasonPicker();
       }
 
@@ -111,6 +131,9 @@ function makeRankingPage(settings) {
         seasonSlot.innerHTML = seasonPicker(years, season.from, season.to);
         wireSeasonPicker(seasonSlot, years, season, picked => {
           season = picked;
+          /* Going back to the whole span counts as not having picked, so the
+             range starts following the competition again. */
+          seasonChosen = !(picked.from === years[0] && picked.to === years[years.length - 1]);
           showAll = false;
           drawSeasonPicker();
           paint();
@@ -177,7 +200,9 @@ function makeRankingPage(settings) {
         });
       }
 
-      if (chosen) {
+      if (!hasPicker) {
+        await loadChosen();
+      } else if (chosen) {
         document.getElementById("rankPick").value = chosen;
         await loadChosen();
       } else {
@@ -228,6 +253,19 @@ export function makeTeamRankingPage(settings) {
     /* A team file is already the map of player to their year rows. */
     opponentsOf: record => record,
     badge: (teamId, teams) => teamCell(teamId, teams),
+  });
+}
+
+/* ─── Rank everyone (the leaderboards) ─────────────────────────────────────── */
+
+/* No picker: the whole file is the list. settings.load says which one. */
+export function makeLeaderboardPage(settings) {
+  return makeRankingPage({
+    ...settings,
+    loadRecord: () => settings.load(),
+    /* The file is already a map of player name to their year rows. */
+    opponentsOf: record => record,
+    badge: (_key, _teams, label) => `${settings.icon} ${escapeHtml(label)}`,
   });
 }
 
@@ -297,6 +335,12 @@ export const SORT_BY_BALLS_PER_OUT = {
 export const SORT_BY_STRIKE_RATE_LOW = {
   id: "srlow", label: "Strike rate (lowest)", compare: smallestFirst(r => r.strikeRate),
   needs: r => r.balls >= 18, note: "min 18 balls",
+};
+/* The career leaderboard needs a much higher floor than a single matchup does,
+   or a bowler with two tidy overs to their name tops the list. */
+export const SORT_BY_CAREER_ECONOMY_LOW = {
+  id: "econlow", label: "Economy (lowest)", compare: smallestFirst(r => r.economy),
+  needs: r => r.balls >= 3000, note: "min 500 overs",
 };
 export const SORT_BY_ECONOMY_LOW = {
   id: "econlow", label: "Economy (lowest)", compare: smallestFirst(r => r.economy),

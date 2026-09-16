@@ -13,7 +13,8 @@ Every page can be filtered by competition:
 | IPL | IPL only |
 | Test / ODI / T20I | that format only |
 
-The three batter pages and the two team pages add a season filter on top of that. Pick a "from" and a
+The three batter pages, the two team pages and the two leaderboards add a
+season filter on top of that. Pick a "from" and a
 "to" year for a span, or set both to the same year for a single season; "All
 years" puts it back to the whole career. Only years the batter actually has a
 record in are offered, and the list follows whichever competition is selected.
@@ -32,6 +33,8 @@ the two do not always add up to the total.
 | 🛡 Batter vs Teams | Which opposition does this batter score most against? Same sort options as Batter Strengths. |
 | 🩹 Team vs Batters | Pick a team: which batters score most against them? Same filters and sorts as Batter Strengths. |
 | 🧨 Team vs Bowlers | Pick a team: which bowlers take most wickets against them? Sort by wickets, dot balls, balls bowled or lowest economy. |
+| 🏆 Batting Leaders | Every batter's career runs, ranked. Nothing to pick — same filters and sorts as Batter Strengths. |
+| 🥇 Bowling Leaders | Every bowler's career wickets, ranked. Sort by wickets, dot balls, balls bowled or lowest economy. |
 | ⚔️ Player Matchup | One batter against one bowler, with every encounter listed. |
 | ⚾ Bowler Strengths | Which batters does this bowler dominate? |
 | 🏅 Milestones | Active players closing in on a career landmark. |
@@ -46,6 +49,20 @@ so it needs to be served over HTTP rather than opened as a file:
 python -m http.server 8000
 # then open http://localhost:8000
 ```
+
+## What the data does and does not cover
+
+CricSheet has ball-by-ball data from 2001 onwards and nothing before that, so
+the leaderboards are career totals **within this data**, not lifetime records.
+The early years are thin — one Test in 2001 and one in 2002, against roughly
+forty a year by 2006 — so a player whose career started before about 2005 will
+read low against the record books. Stuart Broad's 604 Test wickets and Alastair
+Cook's 12,472 Test runs come out exactly right; James Anderson, who debuted in
+2003, reads 682 against his actual 704.
+
+Super overs are left out of every total, which is how official records treat
+them, and four or six runs that were all run count as runs but not as a
+boundary.
 
 ## Rebuilding the data
 
@@ -87,6 +104,8 @@ since that page has no season filter.
 | `tbat/<team>.json` | per team: per-year rows for every batter who has scored against them |
 | `tbowl/<team>.json` | per team: per-year rows for every bowler who has taken wickets against them |
 | `team_index.json` | team id → file name, for the batting and bowling sets |
+| `leaders_bat.json` | every batter's per-year career totals, for the Batting Leaders page |
+| `leaders_bowl.json` | every bowler's per-year career totals, for the Bowling Leaders page |
 | `inn/<n>.json` | per batter-vs-bowler pairing: every individual encounter |
 | `venues.json` | per ground: innings averages and result splits |
 | `milestones.json` | players approaching a career landmark |

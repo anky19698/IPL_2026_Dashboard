@@ -23,6 +23,10 @@ export const batterIndex = () => load("bat_index");
 export const bowlerIndex = () => load("bowl_index");
 export const teamIndex   = () => load("team_index");
 
+/* Career totals for everyone, which the two leaderboard pages rank. */
+export const battingLeaders = () => load("leaders_bat");
+export const bowlingLeaders = () => load("leaders_bowl");
+
 /* Everything a single batter has done: "b" is per bowler, "t" is per team. */
 export async function batterRecord(name) {
   const index = await batterIndex();

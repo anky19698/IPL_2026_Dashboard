@@ -374,6 +374,24 @@ def aggregate_bowler_vs_team(deliveries):
     return per_year
 
 
+def aggregate_career_totals(deliveries):
+    """
+    Per-year totals for every batter and every bowler across all their cricket,
+    which is what the two leaderboard pages rank.
+
+    Both come back in the same positions as every other year row. The bowling
+    one is read from the bowling side — balls bowled, runs conceded, wickets
+    taken — with the win/loss slots left empty, same as the team files.
+    """
+    batting = deliveries.groupby(["striker", "year"], sort=False).agg(
+        matches=("match_id", "nunique"), **YEAR_TOTALS).reset_index()
+
+    bowling = deliveries.groupby(["bowler", "year"], sort=False).agg(
+        matches=("match_id", "nunique"), **YEAR_TOTALS).reset_index()
+
+    return batting, bowling
+
+
 def aggregate_innings(deliveries, keep_pairs):
     grouped = deliveries.groupby(["striker", "bowler", "match_id", "innings"], sort=False).agg(
         runs=("runs_off_bat", "sum"),
@@ -623,6 +641,8 @@ def main():
     innings_rows = defaultdict(dict)        # (batter, bowler) -> {code: [rows]}
     venue_totals = {}                       # code -> {raw venue: counters}
     player_totals = {}                      # code -> (batting, bowling, teams)
+    batting_careers = defaultdict(dict)     # batter -> {code: [year rows]}
+    bowling_careers = defaultdict(dict)     # bowler -> {code: [year rows]}
     match_counts = {}
     raw_venue_names = set()
     raw_team_names = set()
@@ -693,11 +713,26 @@ def main():
         print(f"   🏟  venues...")
         venue_totals[code] = aggregate_venue_stats(deliveries, results)
 
+        print(f"   📈 career totals...")
+        careers_bat, careers_bowl = aggregate_career_totals(deliveries)
+        for row in careers_bat.itertuples(index=False):
+            batting_careers[row.striker].setdefault(code, []).append([
+                int(row.year), int(row.balls), int(row.runs), int(row.outs),
+                int(row.dots), int(row.fours), int(row.sixes),
+                int(row.runs_won), int(row.runs_lost), int(row.matches),
+            ])
+        for row in careers_bowl.itertuples(index=False):
+            bowling_careers[row.bowler].setdefault(code, []).append([
+                int(row.year), int(row.balls), int(row.runs), int(row.outs),
+                int(row.dots), int(row.fours), int(row.sixes),
+                0, 0, int(row.matches),
+            ])
+
         print(f"   🎯 player totals...")
         player_totals[code] = aggregate_player_totals(deliveries)
 
         del deliveries, results, matchups, matchup_careers, team_records
-        del bowling_records, innings
+        del bowling_records, innings, careers_bat, careers_bowl
 
     # ─── Report any team spellings we may still be double-counting ────────────
     canonical_names = sorted({canonical_team(n) for n in raw_team_names if canonical_team(n)})
@@ -753,6 +788,17 @@ def main():
         "bowling": bowling_files,
     })
     print(f"   📁 team_index.json ({len(batting_files)} batting, {len(bowling_files)} bowling)")
+
+    # ─── Leaderboard files (everyone's career totals in one place) ───────────
+    def sorted_rows(by_code):
+        return {code: sorted(rows) for code, rows in by_code.items()}
+
+    leaders_bat = {name: sorted_rows(by_code) for name, by_code in batting_careers.items()}
+    leaders_bowl = {name: sorted_rows(by_code) for name, by_code in bowling_careers.items()}
+    size = write_json("leaders_bat.json", leaders_bat)
+    print(f"   📁 leaders_bat.json ({len(leaders_bat):,} batters, {size/1024/1024:.1f} MB)")
+    size = write_json("leaders_bowl.json", leaders_bowl)
+    print(f"   📁 leaders_bowl.json ({len(leaders_bowl):,} bowlers, {size/1024/1024:.1f} MB)")
 
     # ─── Innings files (keyed by batter so the matchup page loads one shard) ──
     grouped_innings = defaultdict(dict)
