@@ -66,10 +66,12 @@ BROWSER_HEADERS = {
     "Referer": "https://cricsheet.org/downloads/",
 }
 
-# How many times to retry a download, and how long to wait between tries
-# (the wait grows with each attempt).
-download_attempts = 4
-seconds_between_download_attempts = 15
+# How many times to retry a download, and how long to wait between tries (the
+# wait grows with each attempt). CricSheet's bot filter turns the runner away
+# with a 415 now and then and lets it through a few minutes later, so these are
+# generous enough to ride that out instead of failing the day's refresh.
+download_attempts = 5
+seconds_between_download_attempts = 60
 
 # Skip the download and reuse whatever is already unzipped in .cricsheet_raw.
 # Handy while developing; the GitHub Action always downloads fresh.
