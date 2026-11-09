@@ -186,6 +186,10 @@ function makeRankingPage(settings) {
             neither, so the two do not always add up to the total.</p>`;
         }
 
+        if (settings.sourceNote) {
+          html += `<p class="table-note">${settings.sourceNote}</p>`;
+        }
+
         if (rows.length > ROWS_TO_SHOW) {
           html += `<div style="text-align:center; margin-top:1rem;">
             <button class="btn btn--outline" id="rankToggle">
@@ -258,9 +262,17 @@ export function makeTeamRankingPage(settings) {
 
 /* ─── Rank everyone (the leaderboards) ─────────────────────────────────────── */
 
+/* Career totals come only from CricSheet's ball-by-ball files. CricSheet does
+   not have every international ever played, so a few players read lower than
+   the official record (Rohit Sharma is 7 T20I innings short of Cricinfo). */
+const LEADERBOARD_SOURCE_NOTE = `Totals come from CricSheet ball-by-ball data.
+  A few international matches are not in CricSheet, so some
+  careers read a little lower than Cricinfo. Mat counts matches where the player batted or bowled.`;
+
 /* No picker: the whole file is the list. settings.load says which one. */
 export function makeLeaderboardPage(settings) {
   return makeRankingPage({
+    sourceNote: LEADERBOARD_SOURCE_NOTE,
     ...settings,
     loadRecord: () => settings.load(),
     /* The file is already a map of player name to their year rows. */
